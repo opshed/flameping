@@ -1,0 +1,33 @@
+[Unit]
+Description=Flameping network monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=flameping
+StateDirectoryMode=0750
+ConfigurationDirectory=flameping
+UMask=0027
+WorkingDirectory=/var/lib/flameping
+ExecStart=/usr/local/bin/flameping run --config /etc/flameping/config.yaml
+Restart=on-failure
+RestartSec=5s
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

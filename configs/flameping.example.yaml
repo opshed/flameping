@@ -1,0 +1,57 @@
+server:
+  listen: 127.0.0.1:8080
+  allow_public: false
+
+storage:
+  path: ./flameping.db
+  durability: normal
+  raw_retention: 168h
+  minute_retention: 2160h
+  hour_retention: 43800h
+  trace_retention: 720h
+  max_bytes: 5GiB
+  free_space_reserve: 1GiB
+  free_space_reserve_percent: 10
+
+ping:
+  interval: 5s
+  timeout: 1s
+  min_interval: 100ms
+  event_queue: 8192
+  send_queue: 1024
+  max_probes_per_second: 5000
+
+dns:
+  refresh_interval: 5m
+
+targets:
+  - id: gateway
+    name: Gateway
+    address: 1.1.1.1
+    family: auto
+    traceroute: true
+
+interfaces: []
+# To monitor local network interfaces, replace the empty list above with:
+# interfaces:
+#   - name: eth0
+#     display_name: WAN uplink
+#     interval: 5s
+#   - name: enp2s0
+#     display_name: LAN
+#     interval: 1s
+
+traceroute:
+  enabled: true
+  method: auto
+  interval: 15m
+  probes_per_hop: 3
+  max_hops: 30
+  hop_timeout: 1s
+  overall_timeout: 10s
+  pipeline_hops: 4
+  max_packets_per_second: 50
+
+logging:
+  level: info
+  format: json

@@ -1,0 +1,27 @@
+I would like a smokeping-like program, written in go as a single executable, that does
+network monitoring.  Smokeping is kind of a handful to manage because it is perl, but also
+one downside is that it only does a burst of pings every minute.
+
+I'd like something that has the following features: It can take multiple destinations, it
+can ping every X seconds, maybe defaulting to 5 (but potentially even fractional seconds
+like 0.1), we might want a "default timeout" after which we consider a packet lost (for
+display purposes, we would still record a >timeout packet if we receive it later), it has
+a web interface that can display ping latency and loss graphs, with drill-down.
+That is the core set of features, additional features I'd like are the ability to specify
+network interfaces on the local machine and for it to monitor interface statistics like
+errors and lost packets and report them, and also to periodically send a trace route burst
+of packets to record the route the packets are taking to reach the destination, and record
+changes in that route.
+
+A tricky consideration will be where to store that data.  smokeping uses RRD files as the
+data store, but those can be tricky because they flush the discs for reliability and that
+causes a LOT of disc contention, even on SSDs.  I probably want to target being able to
+review at absolute least a days worth of data, and a week would be preferable.  A month's
+worth would be ideal.  It would be fantastic if it could be a single binary that could be
+run standalone (like using sqlite), but if some sort of TSDB (prometheus, postgres with
+extension, influxdb) is needed to achieve this, then a docker compose that can set it up
+is fine.  If it can be done without overcomplicating things, the ability to use a sqlite
+for simple/low volume setups and a better database for more serious setups would be an
+option.  Another consideration is whether all this can be done in a single go process (all
+the scheduling and event loops), or whether it needs to be split out into multiple
+processes.

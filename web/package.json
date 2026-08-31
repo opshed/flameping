@@ -1,0 +1,14 @@
+{
+  "name": "flameping-web",
+  "private": true,
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "typecheck": "tsc --noEmit",
+    "browser-smoke": "node browser-smoke.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9",
+    "typescript": "5.9.2",
+    "uplot": "1.6.32"
+  }
+}
