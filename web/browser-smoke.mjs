@@ -26,7 +26,7 @@ function points(from, to) {
     time_ms: Math.round(from + step * i), scheduled:60, attempted:60, sent:60,
     late:i % 7 === 0 ? 1 : 0, unanswered:i % 11 === 0 ? 1 : 0,
     send_errors:0, scheduler_missed:0, min_ms:1+i/10, p50_ms:2+i/10,
-    p95_ms:4+i/10, p99_ms:6+i/10, max_ms:8+i/10, timeout_max_ms:10,
+    p95_ms:4+i/10, p99_ms:6+i/10, max_ms:8+i/10, timeout_max_ms:5000,
     deadline_miss_pct:1.6, no_reply_pct:0.8,
   }));
 }
@@ -87,6 +87,19 @@ const automation = `<script>
     over.dispatchEvent(event("mousemove", box.left+Math.max(40,box.width*.65)));
     document.dispatchEvent(event("mouseup", box.left+Math.max(40,box.width*.65)));
     await wait(500);
+    const latencyRows = () => [...document.querySelectorAll("#latency .u-series")];
+    if (latencyRows().some(row => row.querySelector(".u-label")?.textContent === "timeout")) throw new Error("timeout series still controls the latency plot");
+    const p99 = latencyRows().find(row => row.querySelector(".u-label")?.textContent === "p99");
+    if (!p99) throw new Error("p99 legend row is missing");
+    p99.querySelector("th").click();
+    const hover = new MouseEvent("mousemove", {bubbles:true, clientX:box.left+Math.max(40,box.width*.55), clientY:box.top+Math.max(10,box.height/2)});
+    over.dispatchEvent(hover);
+    await until(() => [...document.querySelectorAll("#latency .u-value")].some(value => value.textContent !== "--"));
+    await wait(4200);
+    const refreshedP99 = latencyRows().find(row => row.querySelector(".u-label")?.textContent === "p99");
+    if (!refreshedP99?.classList.contains("u-off")) throw new Error("legend visibility reset during periodic refresh");
+    if (![...document.querySelectorAll("#latency .u-value")].some(value => value.textContent !== "--")) throw new Error("selected legend values reset during periodic refresh");
+    document.body.dataset.legendPreserved = "true";
     document.body.dataset.smoke = "complete";
   }).catch(error => document.body.dataset.smoke = "error:" + error.message);
 })();
@@ -151,8 +164,9 @@ try {
 
   fixtureMode = true;
   status = {...status, ready:true, pressure:"normal", writer_error:undefined};
-  output = await render(7000);
+  output = await render(9000);
   if (!output.includes('data-smoke="complete"')) throw new Error("fixture workflow did not complete");
+  if (!output.includes('data-legend-preserved="true"')) throw new Error("chart interaction state was not preserved");
   for (const text of [">Backup</h2>", ">eth0</h3>", "missing", "203.0.113.9", "192.0.2.3", "198.51.100.2"]) {
     if (!output.includes(text)) throw new Error(`fixture workflow did not render ${text}`);
   }
@@ -165,7 +179,7 @@ try {
   for (const path of ["/api/v1/targets/backup/ping", "/api/v1/interfaces/eth0/series", "/api/v1/traces/7"]) {
     if (!requestLog.some(request => request.path === path)) throw new Error(`workflow did not request ${path}`);
   }
-  console.log("browser smoke: health states, range and zoom, target/interface switching and missing state, trace selection, and route diff rendered");
+  console.log("browser smoke: health states, range and zoom, persistent legend visibility/values, target/interface switching and missing state, trace selection, and route diff rendered");
 } finally {
   server.close();
 }
