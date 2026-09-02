@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -313,12 +314,232 @@ func TestDirtyOverlayPreservesCleanSiblingRollup(t *testing.T) {
 	if err := db.applyBatch(ctx, []model.Event{{Kind: model.EventProbeSent, Probe: model.ProbeEvent{Key: model.ProbeKey{RunID: runID, Sequence: 88}, TargetID: target.ID, Endpoint: netip.MustParseAddr("127.0.0.1"), ScheduledAt: probeAt, SentAt: probeAt, Timeout: time.Second}}}, make(map[model.ProbeKey]orphanReply)); err != nil {
 		t.Fatal(err)
 	}
-	series, err := db.PingSeries(ctx, target.StableID, start, start.Add(4*time.Minute), 2)
+	series, err := db.PingSeries(ctx, target.StableID, start, start.Add(4*time.Minute), 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(series.Points) == 0 || series.Points[0].Scheduled != 6 {
 		t.Fatalf("points=%+v, want first scheduled=6", series.Points)
+	}
+}
+
+func TestSeriesResolutionDistinguishesNewEntitiesFromPrunedHistory(t *testing.T) {
+	minute := int64(time.Minute / time.Microsecond)
+	hour := int64(time.Hour / time.Microsecond)
+	valid := func(value int64) sql.NullInt64 { return sql.NullInt64{Int64: value, Valid: true} }
+	tests := []struct {
+		name          string
+		desired       time.Duration
+		coverageStart int64
+		rawStart      sql.NullInt64
+		minuteStart   sql.NullInt64
+		hourStart     sql.NullInt64
+		wantSource    int64
+		wantWidth     time.Duration
+	}{
+		{
+			name:          "window predates newly monitored entity",
+			desired:       5 * time.Minute,
+			coverageStart: 6 * hour,
+			rawStart:      valid(6*hour + 5_000_000),
+			minuteStart:   valid(6 * hour),
+			hourStart:     valid(6 * hour),
+			wantSource:    60,
+			wantWidth:     5 * time.Minute,
+		},
+		{
+			name:          "hour tier covers genuinely pruned history",
+			desired:       5 * time.Minute,
+			coverageStart: 6 * hour,
+			rawStart:      valid(8 * hour),
+			minuteStart:   valid(7 * hour),
+			hourStart:     valid(6 * hour),
+			wantSource:    3600,
+			wantWidth:     time.Hour,
+		},
+		{
+			name:          "minute tier covers pruned raw history",
+			desired:       5 * time.Minute,
+			coverageStart: 6 * hour,
+			rawStart:      valid(7 * hour),
+			minuteStart:   valid(6*hour - minute),
+			wantSource:    60,
+			wantWidth:     5 * time.Minute,
+		},
+		{
+			name:          "later hour tier does not hide covering minutes",
+			desired:       time.Hour,
+			coverageStart: 6 * hour,
+			rawStart:      valid(7 * hour),
+			minuteStart:   valid(6 * hour),
+			hourStart:     valid(7 * hour),
+			wantSource:    60,
+			wantWidth:     time.Hour,
+		},
+		{
+			name:          "later minute tier does not hide covering raw data",
+			desired:       5 * time.Minute,
+			coverageStart: 6 * hour,
+			rawStart:      valid(6 * hour),
+			minuteStart:   valid(7 * hour),
+			hourStart:     valid(7 * hour),
+			wantSource:    0,
+			wantWidth:     5 * time.Minute,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source, width := planSeriesResolution(test.desired, test.coverageStart, test.rawStart, test.minuteStart, test.hourStart)
+			if source != test.wantSource || width != test.wantWidth {
+				t.Fatalf("source=%d width=%s, want source=%d width=%s", source, width, test.wantSource, test.wantWidth)
+			}
+		})
+	}
+}
+
+func TestSeriesCoverageStartAllowsStartupButNotRetentionGaps(t *testing.T) {
+	hour := int64(time.Hour / time.Microsecond)
+	valid := func(value int64) sql.NullInt64 { return sql.NullInt64{Int64: value, Valid: true} }
+	if got := seriesCoverageStart(0, 6*hour, valid(6*hour+5_000_000), 5*time.Second); got != 6*hour+5_000_000 {
+		t.Fatalf("new target coverage start=%d", got)
+	}
+	if got := seriesCoverageStart(0, 2*hour, valid(6*hour), 5*time.Second); got != 2*hour {
+		t.Fatalf("retained target coverage start=%d", got)
+	}
+}
+
+func TestPresetSeriesResolutions(t *testing.T) {
+	start := sql.NullInt64{Int64: 0, Valid: true}
+	tests := []struct {
+		name       string
+		desired    time.Duration
+		wantSource int64
+	}{
+		{name: "one hour preset", desired: time.Minute, wantSource: 60},
+		{name: "six hour preset", desired: 5 * time.Minute, wantSource: 60},
+		{name: "day preset", desired: 15 * time.Minute, wantSource: 60},
+		{name: "week preset", desired: time.Hour, wantSource: 3600},
+		{name: "month preset", desired: 4 * time.Hour, wantSource: 3600},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source, width := planSeriesResolution(test.desired, 0, start, start, start)
+			if source != test.wantSource || width != test.desired {
+				t.Fatalf("source=%d width=%s, want source=%d width=%s", source, width, test.wantSource, test.desired)
+			}
+		})
+	}
+}
+
+func TestSeriesPointWidthReservesAlignedBoundaryPoint(t *testing.T) {
+	tests := []struct {
+		span      time.Duration
+		maxPoints int
+		want      time.Duration
+	}{
+		{span: time.Hour, maxPoints: 61, want: time.Minute},
+		{span: 6 * time.Hour, maxPoints: 73, want: 5 * time.Minute},
+		{span: 24 * time.Hour, maxPoints: 97, want: 15 * time.Minute},
+		{span: 7 * 24 * time.Hour, maxPoints: 169, want: time.Hour},
+		{span: 30 * 24 * time.Hour, maxPoints: 181, want: 4 * time.Hour},
+		{span: time.Hour, maxPoints: 1, want: time.Hour},
+	}
+	for _, test := range tests {
+		if got := seriesPointWidth(test.span, test.maxPoints); got != test.want {
+			t.Errorf("span=%s max_points=%d width=%s, want %s", test.span, test.maxPoints, got, test.want)
+		}
+	}
+}
+
+func TestUnalignedSeriesRespectPointCap(t *testing.T) {
+	db, _, target, runID := openTestDB(t)
+	ctx := context.Background()
+	start := time.Now().Add(-2 * time.Hour).Truncate(time.Minute)
+	address := netip.MustParseAddr("127.0.0.1")
+	events := make([]model.Event, 0, 124)
+	for index := 0; index < 62; index++ {
+		at := start.Add(time.Duration(index)*time.Minute + 10*time.Second)
+		events = append(events,
+			model.Event{Kind: model.EventProbeSent, Probe: model.ProbeEvent{Key: model.ProbeKey{RunID: runID, Sequence: uint64(index + 1)}, TargetID: target.ID, Endpoint: address, ScheduledAt: at, SentAt: at, Timeout: time.Second}},
+			model.Event{Kind: model.EventInterfaceSnapshot, Interface: model.InterfaceEvent{Name: "eth0", BootID: "boot", IfIndex: 2, MAC: "00:11:22:33:44:55", SampledAt: at, Counters: model.InterfaceCounters{RXBytes: uint64(index * 1000), TXBytes: uint64(index * 500)}}},
+		)
+	}
+	if err := db.applyBatch(ctx, events, make(map[model.ProbeKey]orphanReply)); err != nil {
+		t.Fatal(err)
+	}
+	from := start.Add(30 * time.Second)
+	to := from.Add(time.Hour)
+	ping, err := db.PingSeries(ctx, target.StableID, from, to, 61)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ping.ResolutionS != 60 || len(ping.Points) > 61 {
+		t.Fatalf("ping resolution=%d points=%d", ping.ResolutionS, len(ping.Points))
+	}
+	interfaces, err := db.InterfaceSeries(ctx, "eth0", from, to, 61)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interfaces.Points) > 61 {
+		t.Fatalf("interface points=%d", len(interfaces.Points))
+	}
+	ping, err = db.PingSeries(ctx, target.StableID, from, to, 1)
+	if err != nil || len(ping.Points) != 1 {
+		t.Fatalf("single-point ping series points=%d err=%v", len(ping.Points), err)
+	}
+	interfaces, err = db.InterfaceSeries(ctx, "eth0", from, to, 1)
+	if err != nil || len(interfaces.Points) != 1 {
+		t.Fatalf("single-point interface series points=%d err=%v", len(interfaces.Points), err)
+	}
+}
+
+func TestPingSeriesUsesCreationBoundaryWithoutHidingRetainedHistory(t *testing.T) {
+	db, _, target, _ := openTestDB(t)
+	ctx := context.Background()
+	from := time.Now().Add(-7 * time.Hour).Truncate(time.Minute)
+	to := from.Add(6 * time.Hour)
+	entityStart := to.Add(-30 * time.Minute)
+	h := histogram.New()
+	h.Observe(uint64(time.Millisecond))
+	blob, err := h.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertRollup := func(resolution int, bucket time.Time, count int64) {
+		t.Helper()
+		_, err := db.writer.ExecContext(ctx, `INSERT INTO ping_rollups(target_id,resolution_s,bucket_start_us,scheduled_count,attempted_count,sent_count,on_time_count,late_count,unanswered_count,send_error_count,scheduler_missed_count,rtt_count,rtt_sum_ns,rtt_min_ns,rtt_max_ns,histogram,updated_at_us,timeout_min_ns,timeout_max_ns)
+			VALUES(?,?,?,?,?,?,?,0,0,0,0,?,?,?,?,?,?,?,?)`, target.ID, resolution, bucket.UnixMicro(), count, count, count, count, count, count*int64(time.Millisecond), int64(time.Millisecond), int64(time.Millisecond), blob, time.Now().UnixMicro(), int64(time.Second), int64(time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertRollup(60, entityStart.Truncate(time.Minute), 7)
+	insertRollup(3600, entityStart.Truncate(time.Hour), 90)
+	if _, err := db.writer.ExecContext(ctx, `UPDATE targets SET first_seen_us=? WHERE id=?`, entityStart.UnixMicro(), target.ID); err != nil {
+		t.Fatal(err)
+	}
+	series, err := db.PingSeries(ctx, target.StableID, from, to, 73)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if series.ResolutionS != 300 || len(series.Points) != 1 || series.Points[0].Scheduled != 7 {
+		t.Fatalf("new target series=%+v", series)
+	}
+
+	insertRollup(3600, from.Truncate(time.Hour), 99)
+	if _, err := db.writer.ExecContext(ctx, `UPDATE targets SET first_seen_us=? WHERE id=?`, from.Add(-24*time.Hour).UnixMicro(), target.ID); err != nil {
+		t.Fatal(err)
+	}
+	series, err = db.PingSeries(ctx, target.StableID, from, to, 73)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scheduled int64
+	for _, point := range series.Points {
+		scheduled += point.Scheduled
+	}
+	if series.ResolutionS != 3600 || scheduled != 189 {
+		t.Fatalf("retained target resolution=%d scheduled=%d points=%+v", series.ResolutionS, scheduled, series.Points)
 	}
 }
 

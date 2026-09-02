@@ -7,6 +7,8 @@ const dist = new URL("../internal/webui/dist/", import.meta.url).pathname;
 const json = value => JSON.stringify(value);
 let status = {ready:true, pressure:"normal", live_bytes:0, dirty_buckets:0, available_bytes:1_000_000, trace_capabilities:{ipv4:"disabled",ipv6:"disabled"}, interface_capability:"disabled"};
 let fixtureMode = false;
+let interfacePresetFailureUsed = false;
+let interfaceZoomFailureUsed = false;
 const requestLog = [];
 
 const fixtures = {
@@ -69,14 +71,20 @@ const automation = `<script>
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   const until = async test => { for (let i=0; i<40; i++) { const value=test(); if (value) return value; await wait(100); } throw new Error("browser smoke automation timed out"); };
   addEventListener("load", async () => {
-    const range = await until(() => [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "24h"));
+    await until(() => [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "24h"));
     await until(() => document.querySelector("#targets button[data-id=gateway]") && document.querySelector("#latency .u-over"));
-    range.click();
-    await wait(300);
+    for (const label of ["1h", "6h", "7d", "30d", "24h"]) {
+      [...document.querySelectorAll("#ranges button")].find(button => button.textContent === label).click();
+      await wait(150);
+    }
     document.querySelector("#targets button[data-id=backup]").click();
     await wait(300);
     document.querySelector("#interfaces button[data-name=eth0]").click();
     await wait(300);
+    [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "1h").click();
+    await until(() => document.querySelector("#interface-title").textContent.includes("injected interface failure"));
+    [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "24h").click();
+    await until(() => document.querySelector("#interface-title").textContent === "eth0");
     await until(() => document.querySelector("#routes button[data-id='7']"));
     document.querySelector("#routes button[data-id='7']").click();
     await wait(300);
@@ -86,7 +94,12 @@ const automation = `<script>
     over.dispatchEvent(event("mousedown", box.left+Math.max(15,box.width*.2)));
     over.dispatchEvent(event("mousemove", box.left+Math.max(40,box.width*.65)));
     document.dispatchEvent(event("mouseup", box.left+Math.max(40,box.width*.65)));
+    await wait(100);
+    document.querySelector("#targets button[data-id=gateway]").click();
+    await wait(250);
+    document.querySelector("#targets button[data-id=backup]").click();
     await wait(500);
+    if (document.querySelector("#interface-title").textContent !== "eth0") throw new Error("stale interface failure replaced the current request");
     const latencyRows = () => [...document.querySelectorAll("#latency .u-series")];
     if (latencyRows().some(row => row.querySelector(".u-label")?.textContent === "timeout")) throw new Error("timeout series still controls the latency plot");
     const p99 = latencyRows().find(row => row.querySelector(".u-label")?.textContent === "p99");
@@ -113,10 +126,29 @@ const server = createServer(async (request, response) => {
     response.end(json(status));
     return;
   }
+  if (fixtureMode && path === "/api/v1/interfaces/eth0/series") {
+    const maxPoints = Number(url.searchParams.get("max_points"));
+    const logged = {path, from:Number(url.searchParams.get("from")), to:Number(url.searchParams.get("to")), maxPoints};
+    if (maxPoints === 61 && !interfacePresetFailureUsed) {
+      interfacePresetFailureUsed = true;
+      requestLog.push(logged);
+      response.writeHead(500, {"content-type":"text/plain"});
+      response.end("injected interface failure");
+      return;
+    }
+    if (maxPoints === 900 && !interfaceZoomFailureUsed) {
+      interfaceZoomFailureUsed = true;
+      requestLog.push(logged);
+      await new Promise(resolve => setTimeout(resolve, 800));
+      response.writeHead(500, {"content-type":"text/plain"});
+      response.end("stale interface failure");
+      return;
+    }
+  }
   if (fixtureMode) {
     const fixture = fixtureResponse(url);
     if (fixture !== undefined) {
-      requestLog.push({path, from:Number(url.searchParams.get("from")), to:Number(url.searchParams.get("to"))});
+      requestLog.push({path, from:Number(url.searchParams.get("from")), to:Number(url.searchParams.get("to")), maxPoints:Number(url.searchParams.get("max_points"))});
       response.writeHead(200, {"content-type":"application/json"});
       response.end(json(fixture));
       return;
@@ -167,19 +199,27 @@ try {
   output = await render(9000);
   if (!output.includes('data-smoke="complete"')) throw new Error("fixture workflow did not complete");
   if (!output.includes('data-legend-preserved="true"')) throw new Error("chart interaction state was not preserved");
+  if (!output.includes('<h3 id="interface-title">eth0</h3>')) throw new Error("interface request failure did not recover or a stale failure replaced current data");
   for (const text of [">Backup</h2>", ">eth0</h3>", "missing", "203.0.113.9", "192.0.2.3", "198.51.100.2"]) {
     if (!output.includes(text)) throw new Error(`fixture workflow did not render ${text}`);
   }
 
   const pings = requestLog.filter(request => request.path.endsWith("/ping"));
+  for (const [duration, maxPoints] of [[3600e3,61],[6*3600e3,73],[86400e3,97],[7*86400e3,169],[30*86400e3,181]]) {
+    if (!pings.some(request => Math.abs(request.to-request.from-duration) < 1000 && request.maxPoints === maxPoints)) {
+      throw new Error(`missing preset density ${duration}/${maxPoints}: ${JSON.stringify(pings)}`);
+    }
+  }
   const day = pings.find(request => request.to-request.from > 23*3600e3);
-  const zoom = day && pings.find(request => request.path === "/api/v1/targets/backup/ping" && request.to-request.from < 23*3600e3 && request.to-request.from > 0);
+  const zoom = day && pings.find(request => request.path === "/api/v1/targets/backup/ping" && request.to-request.from < 23*3600e3 && request.to-request.from > 0 && request.maxPoints === 900);
   if (!day) throw new Error("24h range preset did not requery the series");
   if (!zoom) throw new Error(`chart zoom did not issue a bounded requery: ${JSON.stringify(pings)}`);
+  const interfaceZoom = requestLog.find(request => request.path === "/api/v1/interfaces/eth0/series" && request.maxPoints === 900 && Math.abs(request.from-zoom.from) < 1000 && Math.abs(request.to-zoom.to) < 1000);
+  if (!interfaceZoom) throw new Error(`interface chart did not follow the detailed zoom: ${JSON.stringify(requestLog)}`);
   for (const path of ["/api/v1/targets/backup/ping", "/api/v1/interfaces/eth0/series", "/api/v1/traces/7"]) {
     if (!requestLog.some(request => request.path === path)) throw new Error(`workflow did not request ${path}`);
   }
-  console.log("browser smoke: health states, range and zoom, persistent legend visibility/values, target/interface switching and missing state, trace selection, and route diff rendered");
+  console.log("browser smoke: health states, preset densities and detailed zoom, persistent legend visibility/values, target/interface switching and missing state, trace selection, and route diff rendered");
 } finally {
   server.close();
 }

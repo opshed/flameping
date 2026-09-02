@@ -144,18 +144,20 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 	if !from.Before(to) {
 		return PingSeries{}, errors.New("series range is entirely in the future")
 	}
-	var targetID, intervalNS int64
-	if err := tx.QueryRowContext(ctx, `SELECT id, interval_ns FROM targets WHERE stable_id=?`, stableID).Scan(&targetID, &intervalNS); err != nil {
+	var targetID, intervalNS, firstSeenUS int64
+	if err := tx.QueryRowContext(ctx, `SELECT id, interval_ns, first_seen_us FROM targets WHERE stable_id=?`, stableID).Scan(&targetID, &intervalNS, &firstSeenUS); err != nil {
 		return PingSeries{}, err
 	}
-	desired := (to.Sub(from) + time.Duration(maxPoints) - 1) / time.Duration(maxPoints)
+	desired := seriesPointWidth(to.Sub(from), maxPoints)
 	if desired < time.Duration(intervalNS) {
 		desired = time.Duration(intervalNS)
 	}
 	sourceResolution := int64(0)
 	pointWidth := desired
 	var rawStart, minuteStart, hourStart sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT MIN(scheduled_at_us) FROM ping_samples WHERE target_id=?`, targetID).Scan(&rawStart); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(first_at_us) FROM (
+		SELECT MIN(scheduled_at_us) AS first_at_us FROM ping_samples WHERE target_id=?
+		UNION ALL SELECT MIN(first_scheduled_at_us) FROM scheduler_gaps WHERE target_id=?)`, targetID, targetID).Scan(&rawStart); err != nil {
 		return PingSeries{}, err
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT MIN(bucket_start_us) FROM ping_rollups WHERE target_id=? AND resolution_s=60`, targetID).Scan(&minuteStart); err != nil {
@@ -164,13 +166,8 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 	if err := tx.QueryRowContext(ctx, `SELECT MIN(bucket_start_us) FROM ping_rollups WHERE target_id=? AND resolution_s=3600`, targetID).Scan(&hourStart); err != nil {
 		return PingSeries{}, err
 	}
-	rawCovers := rawStart.Valid && rawStart.Int64 <= from.UnixMicro()
-	minuteCovers := minuteStart.Valid && minuteStart.Int64 <= from.UnixMicro()
-	if (desired >= time.Hour && hourStart.Valid) || (!rawCovers && !minuteCovers && hourStart.Valid) {
-		sourceResolution, pointWidth = 3600, roundWidth(desired, time.Hour)
-	} else if (desired >= time.Minute && minuteStart.Valid) || (!rawCovers && minuteStart.Valid) {
-		sourceResolution, pointWidth = 60, roundWidth(desired, time.Minute)
-	}
+	coverageStartUS := seriesCoverageStart(from.UnixMicro(), firstSeenUS, rawStart, time.Duration(intervalNS))
+	sourceResolution, pointWidth = planSeriesResolution(desired, coverageStartUS, rawStart, minuteStart, hourStart)
 	var aggregates map[int64]*queryAggregate
 	if sourceResolution == 0 {
 		aggregates, err = queryRawAggregates(ctx, tx, targetID, from, to, asOf, pointWidth, nil)
@@ -183,8 +180,15 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 	if err != nil {
 		return PingSeries{}, err
 	}
+	if maxPoints == 1 && len(aggregates) > 1 {
+		collapsed := make(map[int64]*queryAggregate, 1)
+		for _, aggregate := range aggregates {
+			mergeQueryAggregate(collapsed, from.UnixMicro(), aggregate.pingAggregate, aggregate.partial)
+		}
+		aggregates = collapsed
+	}
 	points := aggregatesToPoints(aggregates)
-	if len(points) > maxPoints+2 {
+	if len(points) > maxPoints {
 		return PingSeries{}, fmt.Errorf("query planner produced %d points over cap %d", len(points), maxPoints)
 	}
 	if err := tx.Commit(); err != nil {
@@ -196,6 +200,57 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 func roundWidth(w, base time.Duration) time.Duration {
 	units := (w + base - 1) / base
 	return units * base
+}
+
+func seriesPointWidth(span time.Duration, maxPoints int) time.Duration {
+	divisor := maxPoints
+	if maxPoints > 1 {
+		// Epoch-aligned buckets can straddle both requested boundaries, so one
+		// point is reserved for the extra partial bucket.
+		divisor--
+	}
+	return (span + time.Duration(divisor) - 1) / time.Duration(divisor)
+}
+
+func seriesCoverageStart(fromUS, firstSeenUS int64, rawStart sql.NullInt64, startupGrace time.Duration) int64 {
+	coverageStartUS := max(fromUS, firstSeenUS)
+	if firstSeenUS > fromUS && rawStart.Valid && rawStart.Int64 > coverageStartUS && rawStart.Int64-coverageStartUS <= startupGrace.Microseconds() {
+		return rawStart.Int64
+	}
+	return coverageStartUS
+}
+
+func planSeriesResolution(desired time.Duration, coverageStartUS int64, rawStart, minuteStart, hourStart sql.NullInt64) (int64, time.Duration) {
+	rawCovers := rawStart.Valid && rawStart.Int64 <= coverageStartUS
+	minuteCovers := minuteStart.Valid && minuteStart.Int64 <= coverageStartUS
+	hourCovers := hourStart.Valid && hourStart.Int64 <= coverageStartUS
+	if (desired >= time.Hour && hourCovers) || (!rawCovers && !minuteCovers && hourCovers) {
+		return 3600, roundWidth(desired, time.Hour)
+	}
+	if (desired >= time.Minute && minuteCovers) || (!rawCovers && minuteCovers) {
+		return 60, roundWidth(desired, time.Minute)
+	}
+	if rawCovers {
+		return 0, desired
+	}
+	// No available tier covers the effective start, so the leading interval
+	// is genuinely empty. Prefer the requested tier for the data that exists.
+	if desired >= time.Hour && hourStart.Valid {
+		return 3600, roundWidth(desired, time.Hour)
+	}
+	if desired >= time.Minute && minuteStart.Valid {
+		return 60, roundWidth(desired, time.Minute)
+	}
+	if rawStart.Valid {
+		return 0, desired
+	}
+	if minuteStart.Valid {
+		return 60, roundWidth(desired, time.Minute)
+	}
+	if hourStart.Valid {
+		return 3600, roundWidth(desired, time.Hour)
+	}
+	return 0, desired
 }
 
 func queryRollupAggregates(ctx context.Context, q *sql.Tx, targetID int64, from, to time.Time, sourceResolution int64, pointWidth time.Duration, skip, onlyParent map[int64]struct{}, parentWidth time.Duration) (map[int64]*queryAggregate, error) {
@@ -675,11 +730,14 @@ func (d *DB) InterfaceSeries(ctx context.Context, name string, from, to time.Tim
 		return InterfaceSeries{}, err
 	}
 	defer tx.Rollback()
-	width := roundWidth((to.Sub(from)+time.Duration(maxPoints)-1)/time.Duration(maxPoints), time.Second)
+	width := roundWidth(seriesPointWidth(to.Sub(from), maxPoints), time.Second)
 	byBucket := make(map[int64]*InterfacePoint)
 	asOf := time.Now()
 	sourceResolution := int64(0)
-	var rawStart, minuteStart, hourStart sql.NullInt64
+	var firstSeen, rawStart, minuteStart, hourStart sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(started_at_us) FROM interface_generations WHERE name=?`, name).Scan(&firstSeen); err != nil {
+		return InterfaceSeries{}, err
+	}
 	if err := tx.QueryRowContext(ctx, `SELECT MIN(s.sampled_at_us) FROM interface_samples s JOIN interface_generations g ON g.id=s.generation_id WHERE g.name=?`, name).Scan(&rawStart); err != nil {
 		return InterfaceSeries{}, err
 	}
@@ -689,13 +747,11 @@ func (d *DB) InterfaceSeries(ctx context.Context, name string, from, to time.Tim
 	if err := tx.QueryRowContext(ctx, `SELECT MIN(r.bucket_start_us) FROM interface_rollups r JOIN interface_generations g ON g.id=r.generation_id WHERE g.name=? AND r.resolution_s=3600`, name).Scan(&hourStart); err != nil {
 		return InterfaceSeries{}, err
 	}
-	rawCovers := rawStart.Valid && rawStart.Int64 <= from.UnixMicro()
-	minuteCovers := minuteStart.Valid && minuteStart.Int64 <= from.UnixMicro()
-	if (width >= time.Hour && hourStart.Valid) || (!rawCovers && !minuteCovers && hourStart.Valid) {
-		sourceResolution, width = 3600, roundWidth(width, time.Hour)
-	} else if (width >= time.Minute && minuteStart.Valid) || (!rawCovers && minuteStart.Valid) {
-		sourceResolution, width = 60, roundWidth(width, time.Minute)
+	coverageStartUS := from.UnixMicro()
+	if firstSeen.Valid {
+		coverageStartUS = seriesCoverageStart(coverageStartUS, firstSeen.Int64, rawStart, time.Minute)
 	}
+	sourceResolution, width = planSeriesResolution(width, coverageStartUS, rawStart, minuteStart, hourStart)
 	if sourceResolution == 0 {
 		if err := queryInterfaceRaw(ctx, tx, name, from, to, width, byBucket); err != nil {
 			return InterfaceSeries{}, err
@@ -789,6 +845,23 @@ func (d *DB) InterfaceSeries(ctx context.Context, name string, from, to time.Tim
 	points := make([]InterfacePoint, 0, len(keys))
 	for _, key := range keys {
 		points = append(points, *byBucket[key])
+	}
+	if maxPoints == 1 && len(points) > 1 {
+		combined := InterfacePoint{TimeMS: from.UnixMilli()}
+		for _, point := range points {
+			combined.RXMbps = max(combined.RXMbps, point.RXMbps)
+			combined.TXMbps = max(combined.TXMbps, point.TXMbps)
+			combined.RXErrors += point.RXErrors
+			combined.TXErrors += point.TXErrors
+			combined.RXDropped += point.RXDropped
+			combined.TXDropped += point.TXDropped
+			combined.RXMissed += point.RXMissed
+			combined.Reset = combined.Reset || point.Reset
+		}
+		points = []InterfacePoint{combined}
+	}
+	if len(points) > maxPoints {
+		return InterfaceSeries{}, fmt.Errorf("interface query planner produced %d points over cap %d", len(points), maxPoints)
 	}
 	if err := tx.Commit(); err != nil {
 		return InterfaceSeries{}, err
