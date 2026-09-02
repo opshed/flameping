@@ -24,13 +24,30 @@ const fixtures = {
 
 function points(from, to) {
   const step = (to - from) / 20;
-  return Array.from({length:21}, (_, i) => ({
-    time_ms: Math.round(from + step * i), scheduled:60, attempted:60, sent:60,
-    late:i % 7 === 0 ? 1 : 0, unanswered:i % 11 === 0 ? 1 : 0,
-    send_errors:0, scheduler_missed:0, min_ms:1+i/10, p50_ms:2+i/10,
-    p95_ms:4+i/10, p99_ms:6+i/10, max_ms:8+i/10, timeout_max_ms:5000,
-    deadline_miss_pct:1.6, no_reply_pct:0.8,
-  }));
+  return Array.from({length:21}, (_, i) => {
+    const noReplyOnly = i === 3;
+    const sendErrors = i === 7 ? 4 : 0;
+    const schedulerMissed = i === 12 ? 8 : 0;
+    const attempted = 60;
+    const sent = attempted - sendErrors;
+    const late = noReplyOnly ? 0 : i % 7 === 0 ? 2 : 0;
+    const unanswered = noReplyOnly ? sent : i % 11 === 0 ? 1 : 0;
+    const distribution = noReplyOnly ? undefined : Array.from({length:17}, (_, grain) => grain < 11 ? 1.55+i*.08+grain*.055 : 8.4+i*.12+(grain-11)*.42);
+    const point = {
+      time_ms:Math.round(from+step*i), scheduled:attempted+schedulerMissed, attempted, sent,
+      late, unanswered, send_errors:sendErrors, scheduler_missed:schedulerMissed,
+      rtt_count:noReplyOnly?0:sent-unanswered, timeout_max_ms:5000,
+      deadline_miss_pct:sent?100*(late+unanswered)/sent:0,
+      no_reply_pct:sent?100*unanswered/sent:0,
+      partial:i===20,
+    };
+    if (distribution) Object.assign(point, {
+      avg_ms:4.75+i*.1, min_ms:1.35+i*.08, p50_ms:1.95+i*.08,
+      p95_ms:10.25+i*.12, p99_ms:13.5+i*.15, max_ms:19+i*.2,
+      distribution_ms:distribution,
+    });
+    return point;
+  });
 }
 
 function fixtureResponse(url) {
@@ -40,7 +57,7 @@ function fixtureResponse(url) {
   if (/^\/api\/v1\/targets\/[^/]+\/ping$/.test(path)) {
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
-    return {points:points(from, to)};
+    return {distribution_method:"midpoint_quantiles", distribution_cap:17, points:points(from, to)};
   }
   if (/^\/api\/v1\/targets\/[^/]+\/traces$/.test(path)) {
     return [{id:7, started_ms:Date.now()-30_000, method:"udp", reached:true, reached_hop:3, status:"complete"}];
@@ -68,11 +85,20 @@ function fixtureResponse(url) {
 
 const automation = `<script>
 (() => {
+  document.body.dataset.smoke = "registered";
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   const until = async test => { for (let i=0; i<40; i++) { const value=test(); if (value) return value; await wait(100); } throw new Error("browser smoke automation timed out"); };
   addEventListener("load", async () => {
+    document.body.dataset.smoke = "loaded";
     await until(() => [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "24h"));
-    await until(() => document.querySelector("#targets button[data-id=gateway]") && document.querySelector("#latency .u-over"));
+    const combined = await until(() => document.querySelector("#targets button[data-id=gateway]") && document.querySelector("#flame .u-over") && document.querySelector("#flame"));
+    if (document.querySelector("#latency") || document.querySelector("#loss") || document.querySelectorAll("#flame .uplot").length !== 1) throw new Error("latency and loss were not consolidated into one plot");
+    if (combined.getAttribute("role") !== "group") throw new Error("combined chart does not preserve legend descendant semantics");
+    if (combined.dataset.distributionMethod !== "midpoint_quantiles" || combined.dataset.distributionCap !== "17" || combined.dataset.maxGrains !== "17") throw new Error("distribution metadata or adaptive grains are missing");
+    await until(() => combined.dataset.flameRendered === "distribution" && combined.dataset.lossRail === "full-no-rtt" && combined.dataset.localGaps === "rendered");
+    const fixtureSeries = await fetch("/api/v1/targets/gateway/ping?from=0&to=100000&max_points=61").then(response => response.json());
+    const bimodal = fixtureSeries.points.find(point => point.distribution_ms?.some((value, index, values) => index > 0 && value-values[index-1] > 4));
+    if (!bimodal || fixtureSeries.distribution_method !== "midpoint_quantiles" || fixtureSeries.distribution_cap !== 17) throw new Error("bimodal midpoint-quantile fixture is missing");
     for (const label of ["1h", "6h", "7d", "30d", "24h"]) {
       [...document.querySelectorAll("#ranges button")].find(button => button.textContent === label).click();
       await wait(150);
@@ -88,7 +114,7 @@ const automation = `<script>
     await until(() => document.querySelector("#routes button[data-id='7']"));
     document.querySelector("#routes button[data-id='7']").click();
     await wait(300);
-    const over = await until(() => document.querySelector("#latency .u-over"));
+    const over = await until(() => document.querySelector("#flame .u-over"));
     const box = over.getBoundingClientRect();
     const event = (name, x) => { const value=new MouseEvent(name, {bubbles:true, clientX:x, clientY:box.top+Math.max(10,box.height/2), buttons:name === "mouseup" ? 0 : 1}); if (name === "mousemove") Object.defineProperty(value,"movementX",{value:25}); return value; };
     over.dispatchEvent(event("mousedown", box.left+Math.max(15,box.width*.2)));
@@ -100,21 +126,40 @@ const automation = `<script>
     document.querySelector("#targets button[data-id=backup]").click();
     await wait(500);
     if (document.querySelector("#interface-title").textContent !== "eth0") throw new Error("stale interface failure replaced the current request");
-    const latencyRows = () => [...document.querySelectorAll("#latency .u-series")];
-    if (latencyRows().some(row => row.querySelector(".u-label")?.textContent === "timeout")) throw new Error("timeout series still controls the latency plot");
-    const p99 = latencyRows().find(row => row.querySelector(".u-label")?.textContent === "p99");
-    if (!p99) throw new Error("p99 legend row is missing");
-    p99.querySelector("th").click();
+    const flameRows = () => [...document.querySelectorAll("#flame .u-series")];
+    if (flameRows().some(row => row.querySelector(".u-label")?.textContent === "timeout")) throw new Error("timeout series still controls the latency plot");
+    for (const label of ["mean RTT", "p50", "p95", "best", "deadline miss", "no reply", "late reply", "local send error", "scheduler gap", "partial bucket"]) {
+      if (!flameRows().some(row => row.querySelector(".u-label")?.textContent === label)) throw new Error("combined legend is missing " + label);
+    }
+    const p99 = flameRows().find(row => row.querySelector(".u-label")?.textContent === "p99");
+    const max = flameRows().find(row => row.querySelector(".u-label")?.textContent === "max");
+    const late = flameRows().find(row => row.querySelector(".u-label")?.textContent === "late reply");
+    if (!p99?.classList.contains("hover-only") || !max?.classList.contains("hover-only")) throw new Error("p99/max are not marked hover-only");
+    if (!late?.classList.contains("tooltip-only") || getComputedStyle(late.querySelector("th")).pointerEvents !== "none") throw new Error("late reply is not tooltip-only and noninteractive");
     const hover = new MouseEvent("mousemove", {bubbles:true, clientX:box.left+Math.max(40,box.width*.55), clientY:box.top+Math.max(10,box.height/2)});
     over.dispatchEvent(hover);
-    await until(() => [...document.querySelectorAll("#latency .u-value")].some(value => value.textContent !== "--"));
+    await until(() => [p99,max,late].every(row => row.querySelector(".u-value")?.textContent !== "--"));
+    p99.querySelector("th").click();
     await wait(4200);
-    const refreshedP99 = latencyRows().find(row => row.querySelector(".u-label")?.textContent === "p99");
+    const refreshedP99 = flameRows().find(row => row.querySelector(".u-label")?.textContent === "p99");
     if (!refreshedP99?.classList.contains("u-off")) throw new Error("legend visibility reset during periodic refresh");
-    if (![...document.querySelectorAll("#latency .u-value")].some(value => value.textContent !== "--")) throw new Error("selected legend values reset during periodic refresh");
+    if (![...document.querySelectorAll("#flame .u-value")].some(value => value.textContent !== "--")) throw new Error("selected legend values reset during periodic refresh");
     document.body.dataset.legendPreserved = "true";
     document.body.dataset.smoke = "complete";
   }).catch(error => document.body.dataset.smoke = "error:" + error.message);
+})();
+</script>`;
+
+const screenshotAutomation = `<script>
+(() => {
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const until = async test => { for (let i=0; i<50; i++) { const value=test(); if (value) return value; await wait(100); } throw new Error("screenshot fixture timed out"); };
+  addEventListener("load", async () => {
+    await until(() => document.querySelector("#flame[data-flame-rendered=distribution]") && document.querySelector("#targets button[data-id=backup]"));
+    document.querySelector("#targets button[data-id=backup]").click();
+    await until(() => document.querySelector("#title").textContent === "Backup" && document.querySelector("#flame[data-loss-rail=full-no-rtt]"));
+    document.body.dataset.screenshotReady = "true";
+  }).catch(error => document.body.dataset.screenshotReady = "error:" + error.message);
 })();
 </script>`;
 
@@ -161,7 +206,7 @@ const server = createServer(async (request, response) => {
   const file = path === "/" ? "index.html" : path.slice(1);
   try {
     let body = await readFile(join(dist, file));
-    if (fixtureMode && file === "index.html") body = Buffer.from(body.toString().replace("</body>", `${automation}</body>`));
+    if (fixtureMode && file === "index.html") body = Buffer.from(body.toString().replace("</body>", `${url.searchParams.has("screenshot")?screenshotAutomation:automation}</body>`));
     response.writeHead(200, {"content-type":extname(file)===".js"?"text/javascript":extname(file)===".css"?"text/css":"text/html"});
     response.end(body);
   } catch {
@@ -182,6 +227,14 @@ async function render(virtualTime=3000) {
   return output;
 }
 
+async function captureScreenshot(path, width, height) {
+  const child = spawn(chrome, ["--headless", "--disable-gpu", "--no-sandbox", "--disable-crash-reporter", "--disable-crashpad", "--hide-scrollbars", "--force-device-scale-factor=1", `--window-size=${width},${height}`, "--virtual-time-budget=6000", `--screenshot=${path}`, `http://127.0.0.1:${port}/?screenshot=1`], {stdio:["ignore", "ignore", "pipe"]});
+  let errors = "";
+  child.stderr.on("data", chunk => errors += chunk);
+  const code = await new Promise(resolve => child.on("close", resolve));
+  if (code !== 0) throw new Error(`Chrome screenshot exited ${code}: ${errors}`);
+}
+
 try {
   let output = await render();
   if (!output.includes('id="health" class="pill ready"') || !output.includes("No interfaces configured")) {
@@ -197,7 +250,7 @@ try {
   fixtureMode = true;
   status = {...status, ready:true, pressure:"normal", writer_error:undefined};
   output = await render(9000);
-  if (!output.includes('data-smoke="complete"')) throw new Error("fixture workflow did not complete");
+  if (!output.includes('data-smoke="complete"')) throw new Error(`fixture workflow did not complete: ${output.match(/data-smoke="([^"]+)/)?.[1]??"no smoke state"}; target=${output.includes("data-id=\"gateway\"")} over=${output.includes("class=\"u-over\"")} flame=${output.match(/<div id="flame"[^>]*>/)?.[0]??"missing"} subtitle=${output.match(/<p id="subtitle"[^>]*>[^<]*/)?.[0]??"missing"}`);
   if (!output.includes('data-legend-preserved="true"')) throw new Error("chart interaction state was not preserved");
   if (!output.includes('<h3 id="interface-title">eth0</h3>')) throw new Error("interface request failure did not recover or a stale failure replaced current data");
   for (const text of [">Backup</h2>", ">eth0</h3>", "missing", "203.0.113.9", "192.0.2.3", "198.51.100.2"]) {
@@ -219,7 +272,15 @@ try {
   for (const path of ["/api/v1/targets/backup/ping", "/api/v1/interfaces/eth0/series", "/api/v1/traces/7"]) {
     if (!requestLog.some(request => request.path === path)) throw new Error(`workflow did not request ${path}`);
   }
-  console.log("browser smoke: health states, preset densities and detailed zoom, persistent legend visibility/values, target/interface switching and missing state, trace selection, and route diff rendered");
+  if (process.env.FLAMEPING_SCREENSHOT) {
+    await captureScreenshot(process.env.FLAMEPING_SCREENSHOT, 1440, 1100);
+    console.log(`browser smoke: wrote desktop screenshot to ${process.env.FLAMEPING_SCREENSHOT}`);
+  }
+  if (process.env.FLAMEPING_SCREENSHOT_MOBILE) {
+    await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_MOBILE, 390, 844);
+    console.log(`browser smoke: wrote mobile screenshot to ${process.env.FLAMEPING_SCREENSHOT_MOBILE}`);
+  }
+  console.log("browser smoke: combined flame density/loss rail, full no-RTT loss and local gaps, p99/max hover-only values, preset densities and detailed zoom, persistent legend visibility/values, target/interface switching and missing state, trace selection, and route diff rendered");
 } finally {
   server.close();
 }

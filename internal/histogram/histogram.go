@@ -45,31 +45,58 @@ func (h *Histogram) Merge(other *Histogram) {
 }
 
 func (h *Histogram) Quantile(q float64) uint64 {
-	if h.count == 0 {
-		return 0
+	return h.Quantiles([]float64{q})[0]
+}
+
+// Quantiles returns estimates in the same order as qs. Histogram buckets and
+// requested ranks are each sorted once, then resolved in a single bucket scan.
+func (h *Histogram) Quantiles(qs []float64) []uint64 {
+	values := make([]uint64, len(qs))
+	if h.count == 0 || len(qs) == 0 {
+		return values
 	}
-	if q < 0 {
-		q = 0
-	} else if q > 1 {
-		q = 1
+	type request struct {
+		rank  uint64
+		index int
 	}
-	rank := uint64(math.Ceil(q * float64(h.count)))
-	if rank < 1 {
-		rank = 1
+	requests := make([]request, len(qs))
+	for i, q := range qs {
+		if q < 0 {
+			q = 0
+		} else if q > 1 {
+			q = 1
+		}
+		rank := uint64(math.Ceil(q * float64(h.count)))
+		if rank < 1 {
+			rank = 1
+		}
+		requests[i] = request{rank: rank, index: i}
 	}
-	indices := h.indices()
+	sort.SliceStable(requests, func(i, j int) bool { return requests[i].rank < requests[j].rank })
+
+	requestIndex := 0
 	var seen uint64
-	for _, idx := range indices {
+	for _, idx := range h.indices() {
 		seen += h.buckets[idx]
-		if seen >= rank {
-			value := math.Exp((float64(idx) + 0.5) * logGamma)
-			if value >= float64(math.MaxUint64) {
-				return math.MaxUint64
-			}
-			return uint64(math.Round(value))
+		if requests[requestIndex].rank > seen {
+			continue
+		}
+		value := math.Exp((float64(idx) + 0.5) * logGamma)
+		var quantile uint64
+		if value >= float64(math.MaxUint64) {
+			quantile = math.MaxUint64
+		} else {
+			quantile = uint64(math.Round(value))
+		}
+		for requestIndex < len(requests) && requests[requestIndex].rank <= seen {
+			values[requests[requestIndex].index] = quantile
+			requestIndex++
+		}
+		if requestIndex == len(requests) {
+			break
 		}
 	}
-	return 0
+	return values
 }
 
 func (h *Histogram) MarshalBinary() ([]byte, error) {

@@ -28,33 +28,43 @@ type TargetSummary struct {
 }
 
 type PingPoint struct {
-	TimeMS          int64    `json:"time_ms"`
-	Scheduled       int64    `json:"scheduled"`
-	Attempted       int64    `json:"attempted"`
-	Sent            int64    `json:"sent"`
-	OnTime          int64    `json:"on_time"`
-	Late            int64    `json:"late"`
-	Unanswered      int64    `json:"unanswered"`
-	SendErrors      int64    `json:"send_errors"`
-	SchedulerMissed int64    `json:"scheduler_missed"`
-	MinMS           *float64 `json:"min_ms,omitempty"`
-	P50MS           *float64 `json:"p50_ms,omitempty"`
-	P95MS           *float64 `json:"p95_ms,omitempty"`
-	P99MS           *float64 `json:"p99_ms,omitempty"`
-	MaxMS           *float64 `json:"max_ms,omitempty"`
-	TimeoutMinMS    *float64 `json:"timeout_min_ms,omitempty"`
-	TimeoutMaxMS    *float64 `json:"timeout_max_ms,omitempty"`
-	DeadlineMissPct float64  `json:"deadline_miss_pct"`
-	NoReplyPct      float64  `json:"no_reply_pct"`
-	Partial         bool     `json:"partial,omitempty"`
+	TimeMS          int64     `json:"time_ms"`
+	Scheduled       int64     `json:"scheduled"`
+	Attempted       int64     `json:"attempted"`
+	Sent            int64     `json:"sent"`
+	OnTime          int64     `json:"on_time"`
+	Late            int64     `json:"late"`
+	Unanswered      int64     `json:"unanswered"`
+	SendErrors      int64     `json:"send_errors"`
+	SchedulerMissed int64     `json:"scheduler_missed"`
+	RTTCount        int64     `json:"rtt_count"`
+	AvgMS           *float64  `json:"avg_ms,omitempty"`
+	MinMS           *float64  `json:"min_ms,omitempty"`
+	P50MS           *float64  `json:"p50_ms,omitempty"`
+	P95MS           *float64  `json:"p95_ms,omitempty"`
+	P99MS           *float64  `json:"p99_ms,omitempty"`
+	MaxMS           *float64  `json:"max_ms,omitempty"`
+	DistributionMS  []float64 `json:"distribution_ms,omitempty"`
+	TimeoutMinMS    *float64  `json:"timeout_min_ms,omitempty"`
+	TimeoutMaxMS    *float64  `json:"timeout_max_ms,omitempty"`
+	DeadlineMissPct float64   `json:"deadline_miss_pct"`
+	NoReplyPct      float64   `json:"no_reply_pct"`
+	Partial         bool      `json:"partial,omitempty"`
 }
 
 type PingSeries struct {
-	TargetID    string      `json:"target_id"`
-	AsOfMS      int64       `json:"as_of_ms"`
-	ResolutionS int64       `json:"resolution_s"`
-	Points      []PingPoint `json:"points"`
+	TargetID           string      `json:"target_id"`
+	AsOfMS             int64       `json:"as_of_ms"`
+	ResolutionS        int64       `json:"resolution_s"`
+	DistributionMethod string      `json:"distribution_method"`
+	DistributionCap    int         `json:"distribution_cap"`
+	Points             []PingPoint `json:"points"`
 }
+
+const (
+	pingDistributionMethod = "midpoint_quantiles"
+	pingDistributionCap    = 17
+)
 
 type queryAggregate struct {
 	pingAggregate
@@ -194,7 +204,7 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 	if err := tx.Commit(); err != nil {
 		return PingSeries{}, err
 	}
-	return PingSeries{TargetID: stableID, AsOfMS: asOf.UnixMilli(), ResolutionS: max(1, int64(pointWidth/time.Second)), Points: points}, nil
+	return PingSeries{TargetID: stableID, AsOfMS: asOf.UnixMilli(), ResolutionS: max(1, int64(pointWidth/time.Second)), DistributionMethod: pingDistributionMethod, DistributionCap: pingDistributionCap, Points: points}, nil
 }
 
 func roundWidth(w, base time.Duration) time.Duration {
@@ -556,11 +566,23 @@ func aggregatesToPoints(aggregates map[int64]*queryAggregate) []PingPoint {
 		a := aggregates[key]
 		point := PingPoint{TimeMS: key / 1000, Scheduled: a.scheduled, Attempted: a.attempted, Sent: a.sent,
 			OnTime: a.onTime, Late: a.late, Unanswered: a.unanswered, SendErrors: a.sendError,
-			SchedulerMissed: a.schedulerMissed, Partial: a.partial}
+			SchedulerMissed: a.schedulerMissed, RTTCount: a.rttCount, Partial: a.partial}
 		if a.rttCount > 0 {
-			minMS, p50MS := float64(a.rttMin)/1e6, float64(a.hist.Quantile(0.50))/1e6
-			p95MS, p99MS, maxMS := float64(a.hist.Quantile(0.95))/1e6, float64(a.hist.Quantile(0.99))/1e6, float64(a.rttMax)/1e6
-			point.MinMS, point.P50MS, point.P95MS, point.P99MS, point.MaxMS = &minMS, &p50MS, &p95MS, &p99MS, &maxMS
+			distributionCount := min(a.rttCount, int64(pingDistributionCap))
+			quantileRequests := make([]float64, 3+distributionCount)
+			quantileRequests[0], quantileRequests[1], quantileRequests[2] = 0.50, 0.95, 0.99
+			for i := int64(0); i < distributionCount; i++ {
+				quantileRequests[3+i] = (float64(i) + 0.5) / float64(distributionCount)
+			}
+			quantiles := a.hist.Quantiles(quantileRequests)
+			minMS, avgMS, maxMS := float64(a.rttMin)/1e6, float64(a.rttSum)/float64(a.rttCount)/1e6, float64(a.rttMax)/1e6
+			p50MS, p95MS, p99MS := float64(quantiles[0])/1e6, float64(quantiles[1])/1e6, float64(quantiles[2])/1e6
+			point.AvgMS, point.MinMS, point.P50MS, point.P95MS, point.P99MS, point.MaxMS = &avgMS, &minMS, &p50MS, &p95MS, &p99MS, &maxMS
+			point.DistributionMS = make([]float64, distributionCount)
+			for i, value := range quantiles[3:] {
+				value = max(uint64(a.rttMin), min(value, uint64(a.rttMax)))
+				point.DistributionMS[i] = float64(value) / 1e6
+			}
 		}
 		if a.timeoutMin > 0 {
 			minimum, maximum := float64(a.timeoutMin)/1e6, float64(a.timeoutMax)/1e6

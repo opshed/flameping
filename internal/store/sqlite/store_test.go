@@ -560,6 +560,55 @@ func TestLossRatesExcludeLocalAndSchedulerFailures(t *testing.T) {
 	}
 }
 
+func TestPingPointMeanAndAdaptiveDistribution(t *testing.T) {
+	aggregate := pingAggregate{hist: histogram.New(), rttMin: math.MaxInt64}
+	for _, rtt := range []time.Duration{10 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond} {
+		observeRTT(&aggregate, rtt.Nanoseconds())
+	}
+	points := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: aggregate}})
+	if len(points) != 1 {
+		t.Fatalf("points=%+v", points)
+	}
+	point := points[0]
+	if point.RTTCount != 4 || point.AvgMS == nil || *point.AvgMS != 25 {
+		t.Fatalf("count=%d avg=%v, want count=4 avg=25", point.RTTCount, point.AvgMS)
+	}
+	if len(point.DistributionMS) != 4 {
+		t.Fatalf("distribution=%v, want four grains", point.DistributionMS)
+	}
+	for i, value := range point.DistributionMS {
+		if value < *point.MinMS || value > *point.MaxMS {
+			t.Fatalf("distribution[%d]=%f outside [%f,%f]", i, value, *point.MinMS, *point.MaxMS)
+		}
+		if i > 0 && value < point.DistributionMS[i-1] {
+			t.Fatalf("distribution is not ordered: %v", point.DistributionMS)
+		}
+	}
+
+	many := pingAggregate{hist: histogram.New(), rttMin: math.MaxInt64}
+	for i := 1; i <= 40; i++ {
+		observeRTT(&many, int64(i)*time.Millisecond.Nanoseconds())
+	}
+	capped := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: many}})[0]
+	if len(capped.DistributionMS) != pingDistributionCap {
+		t.Fatalf("capped distribution has %d grains, want %d", len(capped.DistributionMS), pingDistributionCap)
+	}
+}
+
+func TestPingPointOmitsRTTValuesWithoutReplies(t *testing.T) {
+	point := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: pingAggregate{hist: histogram.New()}}})[0]
+	if point.RTTCount != 0 || point.AvgMS != nil || point.DistributionMS != nil {
+		t.Fatalf("empty RTT point=%+v", point)
+	}
+	data, err := json.Marshal(point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "avg_ms") || strings.Contains(string(data), "distribution_ms") {
+		t.Fatalf("empty RTT fields were not omitted: %s", data)
+	}
+}
+
 func TestInterfaceSeriesUsesHistoricalRollupAndReset(t *testing.T) {
 	db, _, _, _ := openTestDB(t)
 	ctx := context.Background()
