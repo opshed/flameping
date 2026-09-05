@@ -973,7 +973,9 @@ type TraceSummary struct {
 	ID          int64  `json:"id"`
 	StartedMS   int64  `json:"started_ms"`
 	EndedMS     int64  `json:"ended_ms"`
+	Endpoint    string `json:"endpoint"`
 	Method      string `json:"method"`
+	FlowID      string `json:"flow_id"`
 	Status      string `json:"status"`
 	Reached     bool   `json:"reached"`
 	ReachedHop  int    `json:"reached_hop"`
@@ -984,7 +986,6 @@ type TraceSummary struct {
 type TraceDetail struct {
 	TraceSummary
 	TargetID string `json:"target_id"`
-	Endpoint string `json:"endpoint"`
 	Probes   []struct {
 		TTL       int      `json:"ttl"`
 		Index     int      `json:"index"`
@@ -999,35 +1000,22 @@ func (d *DB) Traces(ctx context.Context, stableID string, limit int) ([]TraceSum
 	if limit < 1 || limit > 500 {
 		return nil, errors.New("invalid trace limit")
 	}
-	rows, err := d.readers.QueryContext(ctx, `SELECT tr.id, tr.started_at_us, tr.ended_at_us, tr.method,
-		tr.status, tr.reached, tr.reached_hop, tr.signature, tr.error_detail
-        FROM trace_runs tr JOIN targets t ON t.id=tr.target_id
-        WHERE t.stable_id=? ORDER BY tr.started_at_us DESC LIMIT ?`, stableID, limit)
+	rows, err := d.readers.QueryContext(ctx, traceSummarySelect+`
+        WHERE t.stable_id=? ORDER BY tr.started_at_us DESC,tr.id DESC LIMIT ?`, stableID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := make([]TraceSummary, 0)
-	for rows.Next() {
-		var item TraceSummary
-		var started, ended int64
-		if err := rows.Scan(&item.ID, &started, &ended, &item.Method, &item.Status, &item.Reached, &item.ReachedHop, &item.Signature, &item.ErrorDetail); err != nil {
-			return nil, err
-		}
-		item.StartedMS, item.EndedMS = started/1000, ended/1000
-		result = append(result, item)
-	}
-	return result, rows.Err()
+	return scanTraceSummaries(rows)
 }
 
 func (d *DB) Trace(ctx context.Context, id int64) (TraceDetail, error) {
 	var result TraceDetail
 	var started, ended int64
 	err := d.readers.QueryRowContext(ctx, `SELECT tr.id, tr.started_at_us, tr.ended_at_us, tr.method,
-		tr.status, tr.reached, tr.reached_hop, tr.signature, tr.error_detail, t.stable_id, e.address
+		tr.status, tr.reached, tr.reached_hop, tr.signature, tr.error_detail, t.stable_id, e.address, tr.flow_id
         FROM trace_runs tr JOIN targets t ON t.id=tr.target_id JOIN endpoints e ON e.id=tr.endpoint_id
         WHERE tr.id=?`, id).Scan(&result.ID, &started, &ended, &result.Method, &result.Status, &result.Reached,
-		&result.ReachedHop, &result.Signature, &result.ErrorDetail, &result.TargetID, &result.Endpoint)
+		&result.ReachedHop, &result.Signature, &result.ErrorDetail, &result.TargetID, &result.Endpoint, &result.FlowID)
 	if err != nil {
 		return result, err
 	}
@@ -1083,35 +1071,30 @@ func (d *DB) Trace(ctx context.Context, id int64) (TraceDetail, error) {
 }
 
 type RouteChange struct {
-	ID            int64           `json:"id"`
-	TargetID      string          `json:"target_id"`
-	ConfirmedMS   int64           `json:"confirmed_ms"`
-	OldRoute      json.RawMessage `json:"old_route"`
-	NewRoute      json.RawMessage `json:"new_route"`
-	OldReachedHop int             `json:"old_reached_hop"`
-	NewReachedHop int             `json:"new_reached_hop"`
+	ID                int64           `json:"id"`
+	TargetID          string          `json:"target_id"`
+	FirstSeenMS       int64           `json:"first_seen_ms"`
+	ConfirmedMS       int64           `json:"confirmed_ms"`
+	Endpoint          string          `json:"endpoint"`
+	Method            string          `json:"method,omitempty"`
+	FlowID            string          `json:"flow_id,omitempty"`
+	OldTraceID        *int64          `json:"old_trace_id,omitempty"`
+	CandidateTraceID  *int64          `json:"candidate_trace_id,omitempty"`
+	ConfirmingTraceID *int64          `json:"confirming_trace_id,omitempty"`
+	OldRoute          json.RawMessage `json:"old_route"`
+	NewRoute          json.RawMessage `json:"new_route"`
+	OldReachedHop     int             `json:"old_reached_hop"`
+	NewReachedHop     int             `json:"new_reached_hop"`
 }
 
 func (d *DB) RouteChanges(ctx context.Context, stableID string, limit int) ([]RouteChange, error) {
-	rows, err := d.readers.QueryContext(ctx, `SELECT rc.id, t.stable_id, rc.confirmed_at_us, rc.old_signature, rc.new_signature,
-		rc.old_reached_hop,rc.new_reached_hop
-        FROM route_changes rc JOIN targets t ON t.id=rc.target_id
-        WHERE (?='' OR t.stable_id=?) ORDER BY rc.confirmed_at_us DESC LIMIT ?`, stableID, stableID, limit)
+	if limit < 1 || limit > 500 {
+		return nil, errors.New("invalid route change limit")
+	}
+	rows, err := d.readers.QueryContext(ctx, routeChangeSelect+`
+        WHERE (?='' OR t.stable_id=?) ORDER BY rc.confirmed_at_us DESC,rc.id DESC LIMIT ?`, stableID, stableID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := make([]RouteChange, 0)
-	for rows.Next() {
-		var item RouteChange
-		var at int64
-		var oldRoute, newRoute string
-		if err := rows.Scan(&item.ID, &item.TargetID, &at, &oldRoute, &newRoute, &item.OldReachedHop, &item.NewReachedHop); err != nil {
-			return nil, err
-		}
-		item.ConfirmedMS = at / 1000
-		item.OldRoute, item.NewRoute = json.RawMessage(oldRoute), json.RawMessage(newRoute)
-		result = append(result, item)
-	}
-	return result, rows.Err()
+	return scanRouteChanges(rows)
 }

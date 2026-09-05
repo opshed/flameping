@@ -39,6 +39,8 @@ flameping db compact --config PATH
 
 See [operations.md](docs/operations.md) for deployment and recovery details, [design-research.md](docs/design-research.md) for the design rationale, and [implementation-plan.md](docs/implementation-plan.md) for component invariants.
 
+This branch experiments with a **Route activity** timeline beneath the latency/loss chart. Warm marks show confirmed route changes; a separate lane shows retained trace observations. Select an interval to compare changed hops and inspect individual probes, or use **Zoom charts here** to align the charts to that interval. See the [research and experiment notes](docs/route-timeline-experiment.md) for alternatives, sources, and interpretation.
+
 ## Development
 
 ```sh

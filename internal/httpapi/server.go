@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ func New(address string, db *sqlite.DB, logger *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/interfaces", s.interfaces)
 	mux.HandleFunc("GET /api/v1/interfaces/{name}/series", s.interfaceSeries)
 	mux.HandleFunc("GET /api/v1/targets/{target}/traces", s.traces)
+	mux.HandleFunc("GET /api/v1/targets/{target}/route-history", s.routeHistory)
 	mux.HandleFunc("GET /api/v1/traces/{id}", s.trace)
 	mux.HandleFunc("GET /api/v1/route-changes", s.routeChanges)
 	dist, err := fs.Sub(webui.Dist, "dist")
@@ -110,6 +112,20 @@ func (s *Server) traces(w http.ResponseWriter, r *http.Request) {
 	value, err := s.db.Traces(r.Context(), r.PathValue("target"), limit)
 	respond(w, value, err)
 }
+func (s *Server) routeHistory(w http.ResponseWriter, r *http.Request) {
+	from, to, maxPoints, err := boundedSeriesParams(r, 180, 300)
+	if err != nil || from.UnixMilli() >= to.UnixMilli() || from.UnixMilli() < math.MinInt64/1000 || to.UnixMilli() > math.MaxInt64/1000 {
+		jsonError(w, http.StatusBadRequest, "invalid route history range")
+		return
+	}
+	limit, err := intParam(r, "limit", 100, 1, 500)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	value, err := s.db.RouteHistory(r.Context(), r.PathValue("target"), from, to, maxPoints, limit)
+	respond(w, value, err)
+}
 func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
@@ -130,6 +146,9 @@ func (s *Server) routeChanges(w http.ResponseWriter, r *http.Request) {
 }
 
 func seriesParams(r *http.Request) (time.Time, time.Time, int, error) {
+	return boundedSeriesParams(r, 1000, 20000)
+}
+func boundedSeriesParams(r *http.Request, defaultPoints, maxPointsLimit int) (time.Time, time.Time, int, error) {
 	to := time.Now()
 	from := to.Add(-6 * time.Hour)
 	var err error
@@ -145,7 +164,7 @@ func seriesParams(r *http.Request) (time.Time, time.Time, int, error) {
 			return from, to, 0, errors.New("invalid from time")
 		}
 	}
-	maxPoints, err := intParam(r, "max_points", 1000, 1, 20000)
+	maxPoints, err := intParam(r, "max_points", defaultPoints, 1, maxPointsLimit)
 	if err != nil || !from.Before(to) || to.Sub(from) > 10*365*24*time.Hour {
 		return from, to, 0, errors.New("invalid query range")
 	}

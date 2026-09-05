@@ -91,3 +91,47 @@ func TestSeriesRejectsInvalidRange(t *testing.T) {
 		t.Fatalf("status = %d", response.Code)
 	}
 }
+
+func TestRouteHistoryAPI(t *testing.T) {
+	server := testServer(t)
+	response := httptest.NewRecorder()
+	server.HTTP.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet,
+		"/api/v1/targets/loopback/route-history?from=1000&to=1100&max_points=3&limit=1", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var history sqlite.RouteHistory
+	if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if history.FromMS != 1000 || history.ToMS != 1100 || history.BucketMS != 34 || len(history.Buckets) != 3 ||
+		history.Totals != (sqlite.RouteHistoryCounts{}) || history.Traces == nil || history.Changes == nil {
+		t.Fatalf("history = %+v", history)
+	}
+	response = httptest.NewRecorder()
+	server.HTTP.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/targets/loopback/route-history", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("default range status = %d: %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	server.HTTP.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/targets/missing/route-history", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing target status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRouteHistoryAPIRejectsInvalidParameters(t *testing.T) {
+	server := testServer(t)
+	for _, query := range []string{
+		"from=20&to=10", "from=20&to=20", "from=bad", "to=bad", "max_points=0", "max_points=301",
+		"max_points=bad", "limit=0", "limit=501", "limit=bad", "from=0&to=999999999999",
+		"from=9223372036854775806&to=9223372036854775807",
+		"from=2025-01-01T00:00:00.0001Z&to=2025-01-01T00:00:00.0002Z",
+	} {
+		response := httptest.NewRecorder()
+		server.HTTP.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/targets/loopback/route-history?"+query, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("%s status = %d: %s", query, response.Code, response.Body.String())
+		}
+	}
+}
