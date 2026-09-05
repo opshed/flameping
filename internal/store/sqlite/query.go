@@ -695,24 +695,43 @@ type InterfaceSummary struct {
 }
 
 type InterfacePoint struct {
-	TimeMS    int64   `json:"time_ms"`
-	RXMbps    float64 `json:"rx_mbps"`
-	TXMbps    float64 `json:"tx_mbps"`
-	RXErrors  int64   `json:"rx_errors"`
-	TXErrors  int64   `json:"tx_errors"`
-	RXDropped int64   `json:"rx_dropped"`
-	TXDropped int64   `json:"tx_dropped"`
-	RXMissed  int64   `json:"rx_missed"`
-	Reset     bool    `json:"reset,omitempty"`
+	TimeMS     int64   `json:"time_ms"`
+	RXMbps     float64 `json:"rx_mbps"`
+	TXMbps     float64 `json:"tx_mbps"`
+	RXErrors   int64   `json:"rx_errors"`
+	TXErrors   int64   `json:"tx_errors"`
+	RXDropped  int64   `json:"rx_dropped"`
+	TXDropped  int64   `json:"tx_dropped"`
+	RXMissed   int64   `json:"rx_missed"`
+	RXFIFO     int64   `json:"rx_fifo"`
+	TXFIFO     int64   `json:"tx_fifo"`
+	RXCRC      int64   `json:"rx_crc"`
+	RXFrame    int64   `json:"rx_frame"`
+	TXCarrier  int64   `json:"tx_carrier"`
+	Collisions int64   `json:"collisions"`
+	HasDeltas  bool    `json:"has_deltas"`
+	Partial    bool    `json:"partial,omitempty"`
+	ResetCount int64   `json:"reset_count"`
+	Reset      bool    `json:"reset,omitempty"`
+}
+
+type InterfaceReset struct {
+	AtMS   int64  `json:"at_ms"`
+	Reason string `json:"reason"`
 }
 
 type InterfaceSeries struct {
-	Name   string           `json:"name"`
-	AsOfMS int64            `json:"as_of_ms"`
-	Points []InterfacePoint `json:"points"`
+	Name     string `json:"name"`
+	AsOfMS   int64  `json:"as_of_ms"`
+	BucketMS int64  `json:"bucket_ms"`
+	// The planned historical tier; dirty buckets may use finer observations.
+	SourceResolutionMS int64            `json:"source_resolution_ms"`
+	Resets             []InterfaceReset `json:"resets"`
+	ResetsTruncated    bool             `json:"resets_truncated"`
+	Points             []InterfacePoint `json:"points"`
 }
 
-type interfaceQueryRow struct{ generation, at, rx, tx, rxErr, txErr, rxDrop, txDrop, rxMiss int64 }
+type interfaceQueryRow struct{ generation, at, rx, tx, rxErr, txErr, rxDrop, txDrop, rxMiss, rxFIFO, txFIFO, rxCRC, rxFrame, txCarrier, collisions int64 }
 
 func (d *DB) Interfaces(ctx context.Context) ([]InterfaceSummary, error) {
 	rows, err := d.readers.QueryContext(ctx, `SELECT ci.name,ci.display_name,COALESCE(g.ifindex,0),COALESCE(g.mac,''),COALESCE(s.sampled_at_us,0),
@@ -838,13 +857,16 @@ func (d *DB) InterfaceSeries(ctx context.Context, name string, from, to time.Tim
 			}
 		}
 	}
-	resetRows, err := tx.QueryContext(ctx, `SELECT at_us FROM interface_resets WHERE name=? AND at_us>=? AND at_us<?`, name, from.UnixMicro(), to.UnixMicro())
+	resetRows, err := tx.QueryContext(ctx, `SELECT at_us,reason FROM interface_resets WHERE name=? AND at_us>=? AND at_us<? ORDER BY at_us DESC,id DESC`, name, from.UnixMicro(), to.UnixMicro())
 	if err != nil {
 		return InterfaceSeries{}, err
 	}
+	resets := make([]InterfaceReset, 0)
+	resetsTruncated := false
 	for resetRows.Next() {
 		var at int64
-		if err := resetRows.Scan(&at); err != nil {
+		var reason string
+		if err := resetRows.Scan(&at, &reason); err != nil {
 			resetRows.Close()
 			return InterfaceSeries{}, err
 		}
@@ -855,6 +877,17 @@ func (d *DB) InterfaceSeries(ctx context.Context, name string, from, to time.Tim
 			byBucket[key] = point
 		}
 		point.Reset = true
+		// Reset rows are authoritative. Rollup reset_count must not be added again.
+		point.ResetCount++
+		if len(resets) < 100 {
+			resets = append(resets, InterfaceReset{AtMS: at / 1000, Reason: reason})
+		} else {
+			resetsTruncated = true
+		}
+	}
+	if err := resetRows.Err(); err != nil {
+		resetRows.Close()
+		return InterfaceSeries{}, err
 	}
 	if err := resetRows.Close(); err != nil {
 		return InterfaceSeries{}, err
@@ -866,9 +899,11 @@ func (d *DB) InterfaceSeries(ctx context.Context, name string, from, to time.Tim
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	points := make([]InterfacePoint, 0, len(keys))
 	for _, key := range keys {
+		// This flag describes clipped display edges, not sampling coverage.
+		byBucket[key].Partial = key < from.UnixMicro() || key+width.Microseconds() > to.UnixMicro()
 		points = append(points, *byBucket[key])
 	}
-	if maxPoints == 1 && len(points) > 1 {
+	if maxPoints == 1 && len(points) > 0 {
 		combined := InterfacePoint{TimeMS: from.UnixMilli()}
 		for _, point := range points {
 			combined.RXMbps = max(combined.RXMbps, point.RXMbps)
@@ -878,9 +913,19 @@ func (d *DB) InterfaceSeries(ctx context.Context, name string, from, to time.Tim
 			combined.RXDropped += point.RXDropped
 			combined.TXDropped += point.TXDropped
 			combined.RXMissed += point.RXMissed
+			combined.RXFIFO += point.RXFIFO
+			combined.TXFIFO += point.TXFIFO
+			combined.RXCRC += point.RXCRC
+			combined.RXFrame += point.RXFrame
+			combined.TXCarrier += point.TXCarrier
+			combined.Collisions += point.Collisions
+			combined.HasDeltas = combined.HasDeltas || point.HasDeltas
+			combined.Partial = combined.Partial || point.Partial
+			combined.ResetCount += point.ResetCount
 			combined.Reset = combined.Reset || point.Reset
 		}
 		points = []InterfacePoint{combined}
+		width = to.Sub(from)
 	}
 	if len(points) > maxPoints {
 		return InterfaceSeries{}, fmt.Errorf("interface query planner produced %d points over cap %d", len(points), maxPoints)
@@ -888,18 +933,18 @@ func (d *DB) InterfaceSeries(ctx context.Context, name string, from, to time.Tim
 	if err := tx.Commit(); err != nil {
 		return InterfaceSeries{}, err
 	}
-	return InterfaceSeries{Name: name, AsOfMS: asOf.UnixMilli(), Points: points}, nil
+	return InterfaceSeries{Name: name, AsOfMS: asOf.UnixMilli(), BucketMS: width.Milliseconds(), SourceResolutionMS: sourceResolution * 1000, Resets: resets, ResetsTruncated: resetsTruncated, Points: points}, nil
 }
 
 func queryInterfaceRollupPoints(ctx context.Context, q *sql.Tx, name string, resolution int64, from, to time.Time, width time.Duration, skip, parents map[int64]struct{}, byBucket map[int64]*InterfacePoint) error {
-	rows, err := q.QueryContext(ctx, `SELECT r.bucket_start_us,r.elapsed_ns,r.reset_count,r.rx_bytes_delta,r.tx_bytes_delta,r.rx_errors_delta,r.tx_errors_delta,r.rx_dropped_delta,r.tx_dropped_delta,r.rx_missed_delta,r.peak_rx_bytes_per_s,r.peak_tx_bytes_per_s FROM interface_rollups r JOIN interface_generations g ON g.id=r.generation_id WHERE g.name=? AND r.resolution_s=? AND r.bucket_start_us>=? AND r.bucket_start_us<? ORDER BY r.bucket_start_us`, name, resolution, from.Truncate(time.Duration(resolution)*time.Second).UnixMicro(), to.UnixMicro())
+	rows, err := q.QueryContext(ctx, `SELECT r.bucket_start_us,r.elapsed_ns,r.rx_errors_delta,r.tx_errors_delta,r.rx_dropped_delta,r.tx_dropped_delta,r.rx_missed_delta,r.peak_rx_bytes_per_s,r.peak_tx_bytes_per_s,r.rx_fifo_delta,r.tx_fifo_delta,r.rx_crc_delta,r.rx_frame_delta,r.tx_carrier_delta,r.collisions_delta FROM interface_rollups r JOIN interface_generations g ON g.id=r.generation_id WHERE g.name=? AND r.resolution_s=? AND r.bucket_start_us>=? AND r.bucket_start_us<? ORDER BY r.bucket_start_us`, name, resolution, from.Truncate(time.Duration(resolution)*time.Second).UnixMicro(), to.UnixMicro())
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var bucket, elapsed, resets, rx, tx, rxErr, txErr, rxDrop, txDrop, rxMiss, peakRX, peakTX int64
-		if err := rows.Scan(&bucket, &elapsed, &resets, &rx, &tx, &rxErr, &txErr, &rxDrop, &txDrop, &rxMiss, &peakRX, &peakTX); err != nil {
+		var bucket, elapsed, rxErr, txErr, rxDrop, txDrop, rxMiss, peakRX, peakTX, rxFIFO, txFIFO, rxCRC, rxFrame, txCarrier, collisions int64
+		if err := rows.Scan(&bucket, &elapsed, &rxErr, &txErr, &rxDrop, &txDrop, &rxMiss, &peakRX, &peakTX, &rxFIFO, &txFIFO, &rxCRC, &rxFrame, &txCarrier, &collisions); err != nil {
 			return err
 		}
 		if _, excluded := skip[bucket]; excluded {
@@ -924,14 +969,21 @@ func queryInterfaceRollupPoints(ctx context.Context, q *sql.Tx, name string, res
 		point.RXDropped += rxDrop
 		point.TXDropped += txDrop
 		point.RXMissed += rxMiss
-		point.Reset = point.Reset || resets > 0
+		point.RXFIFO += rxFIFO
+		point.TXFIFO += txFIFO
+		point.RXCRC += rxCRC
+		point.RXFrame += rxFrame
+		point.TXCarrier += txCarrier
+		point.Collisions += collisions
+		point.HasDeltas = point.HasDeltas || elapsed > 0
 	}
 	return rows.Err()
 }
 
 func queryInterfaceRaw(ctx context.Context, q *sql.Tx, name string, from, to time.Time, width time.Duration, byBucket map[int64]*InterfacePoint) error {
 	rows, err := q.QueryContext(ctx, `SELECT s.generation_id, s.sampled_at_us,
-		s.rx_bytes, s.tx_bytes, s.rx_errors, s.tx_errors, s.rx_dropped, s.tx_dropped, s.rx_missed
+		s.rx_bytes, s.tx_bytes, s.rx_errors, s.tx_errors, s.rx_dropped, s.tx_dropped, s.rx_missed,
+		s.rx_fifo, s.tx_fifo, s.rx_crc, s.rx_frame, s.tx_carrier, s.collisions
 		FROM interface_samples s JOIN interface_generations g ON g.id=s.generation_id
 		WHERE g.name=? AND s.sampled_at_us<? AND (s.sampled_at_us>=? OR s.sampled_at_us=(
 			SELECT MAX(p.sampled_at_us) FROM interface_samples p WHERE p.generation_id=s.generation_id AND p.sampled_at_us<?))
@@ -943,7 +995,7 @@ func queryInterfaceRaw(ctx context.Context, q *sql.Tx, name string, from, to tim
 	var previous *interfaceQueryRow
 	for rows.Next() {
 		var current interfaceQueryRow
-		if err := rows.Scan(&current.generation, &current.at, &current.rx, &current.tx, &current.rxErr, &current.txErr, &current.rxDrop, &current.txDrop, &current.rxMiss); err != nil {
+		if err := rows.Scan(&current.generation, &current.at, &current.rx, &current.tx, &current.rxErr, &current.txErr, &current.rxDrop, &current.txDrop, &current.rxMiss, &current.rxFIFO, &current.txFIFO, &current.rxCRC, &current.rxFrame, &current.txCarrier, &current.collisions); err != nil {
 			return err
 		}
 		if previous == nil || previous.generation != current.generation || current.at <= previous.at {
@@ -964,6 +1016,13 @@ func queryInterfaceRaw(ctx context.Context, q *sql.Tx, name string, from, to tim
 		point.RXDropped += current.rxDrop - previous.rxDrop
 		point.TXDropped += current.txDrop - previous.txDrop
 		point.RXMissed += current.rxMiss - previous.rxMiss
+		point.RXFIFO += current.rxFIFO - previous.rxFIFO
+		point.TXFIFO += current.txFIFO - previous.txFIFO
+		point.RXCRC += current.rxCRC - previous.rxCRC
+		point.RXFrame += current.rxFrame - previous.rxFrame
+		point.TXCarrier += current.txCarrier - previous.txCarrier
+		point.Collisions += current.collisions - previous.collisions
+		point.HasDeltas = true
 		previous = &current
 	}
 	return rows.Err()

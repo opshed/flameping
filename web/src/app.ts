@@ -3,24 +3,26 @@ import "uplot/dist/uPlot.min.css";
 import "./app.css";
 import "./extra.css";
 import {RouteHistoryView, type Bounds} from "./route-history";
+import {InterfaceHistoryView} from "./interface-history";
 
 type Target={id:string,name:string,address:string,endpoint?:string,state:string,last_rtt_ms?:number};
 type Point={time_ms:number,scheduled:number,attempted:number,sent:number,on_time?:number,late:number,unanswered:number,send_errors:number,scheduler_missed:number,rtt_count:number,avg_ms?:number,min_ms?:number,p50_ms?:number,p95_ms?:number,p99_ms?:number,max_ms?:number,distribution_ms?:number[],deadline_miss_pct:number,no_reply_pct:number,partial?:boolean,late_pct?:number,send_error_pct?:number,gap_pct?:number,partial_marker?:number};
 type RangePreset={duration:number,maxPoints:number};
 type FlameState={points:Point[]};
 const $=(s:string)=>document.querySelector(s) as HTMLElement;
-let target:string|null=null,selectedInterface:string|null=null,range="6h",targets:Target[]=[];
-let flame:uPlot|null=null,interfacePlot:uPlot|null=null;
+let target:string|null=null,range="6h",targets:Target[]=[];
+let flame:uPlot|null=null;
 const flameState:FlameState={points:[]};
-let viewport:{from:number,to:number}|null=null,seriesRequest=0,interfaceRequest=0;
-let routeSelection:Bounds|null=null,activeBounds:Bounds|null=null,flameContext:string|null=null;
+let viewport:{from:number,to:number}|null=null,seriesRequest=0;
+let routeSelection:Bounds|null=null,interfaceSelection:Bounds|null=null,flameContext:string|null=null;
 const routeView=new RouteHistoryView($("#route-history"),bounds=>drillDown(bounds.from,bounds.to),bounds=>{routeSelection=bounds;flame?.redraw()});
+const interfaceView=new InterfaceHistoryView($("#interface-history"),$("#interface-alert"),$("#interface-details"),bounds=>drillDown(bounds.from,bounds.to),bounds=>{interfaceSelection=bounds;flame?.redraw()});
 const ranges:Record<string,RangePreset>={"1h":{duration:3600e3,maxPoints:61},"6h":{duration:6*3600e3,maxPoints:73},"24h":{duration:86400e3,maxPoints:97},"7d":{duration:7*86400e3,maxPoints:169},"30d":{duration:30*86400e3,maxPoints:181}};
 async function api(path:string){const r=await fetch(path,{headers:{accept:"application/json"}});if(!r.ok)throw new Error(await r.text());return r.json()}
 function esc(s:string){const e=document.createElement("span");e.textContent=s;return e.innerHTML}
-function rangeButtons(){const el=$("#ranges");el.innerHTML="";for(const n of Object.keys(ranges)){const b=document.createElement("button");b.textContent=n;b.className=n===range&&!viewport?"active":"";b.onclick=()=>{range=n;viewport=null;rangeButtons();loadSeries();if(selectedInterface)loadInterface(selectedInterface)};el.append(b)}}
+function rangeButtons(){const el=$("#ranges");el.innerHTML="";for(const n of Object.keys(ranges)){const b=document.createElement("button");b.textContent=n;b.className=n===range&&!viewport?"active":"";b.onclick=()=>{range=n;viewport=null;rangeButtons();loadSeries()};el.append(b)}}
 function renderTargets(){const el=$("#targets");el.innerHTML=targets.map(t=>`<button class="target ${t.id===target?"active":""}" data-id="${esc(t.id)}"><i class="dot ${t.state}"></i><span><strong>${esc(t.name)}</strong><small>${esc(t.endpoint||t.address)}</small></span><span class="rtt">${t.last_rtt_ms==null?"—":t.last_rtt_ms.toFixed(1)+" ms"}</span></button>`).join("");el.querySelectorAll<HTMLButtonElement>("button").forEach(b=>b.onclick=()=>select(b.dataset.id!))}
-function select(id:string){target=id;viewport=null;renderTargets();rangeButtons();const t=targets.find(x=>x.id===id)!;$("#title").textContent=t.name;$("#subtitle").textContent=t.endpoint||t.address;loadSeries();if(selectedInterface)loadInterface(selectedInterface)}
+function select(id:string){target=id;viewport=null;renderTargets();rangeButtons();const t=targets.find(x=>x.id===id)!;$("#title").textContent=t.name;$("#subtitle").textContent=t.endpoint||t.address;loadSeries()}
 
 const flameSeriesIndex={mean:1,p50:2,p95:3,min:4,p99:5,max:6,deadline:7,noReply:8,late:9,sendError:10,schedulerGap:11,partial:12} as const;
 const noPath=()=>null;
@@ -130,8 +132,16 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
 }
 
 function recordDomain(u:uPlot){const root=u.root.parentElement??u.root;root.dataset.from=String((u.scales.x.min??0)*1000);root.dataset.to=String((u.scales.x.max??0)*1000)}
-function alignRoutes(u:uPlot){routeView.align(u.bbox.left/uPlot.pxRatio,Math.max(0,u.width-(u.bbox.left+u.bbox.width)/uPlot.pxRatio))}
-function routeSelectionPlugin():uPlot.Plugin{return{hooks:{ready:[alignRoutes],setSize:[alignRoutes],draw:[u=>{recordDomain(u);if(!routeSelection)return;const {ctx,bbox}=u,left=Math.max(bbox.left,u.valToPos(routeSelection.from/1000,"x",true)),right=Math.min(bbox.left+bbox.width,u.valToPos(routeSelection.to/1000,"x",true));if(right<=left)return;ctx.save();ctx.fillStyle="rgba(255,199,104,.09)";ctx.fillRect(left,bbox.top,right-left,bbox.height);ctx.strokeStyle="rgba(255,210,127,.6)";ctx.lineWidth=uPlot.pxRatio;ctx.setLineDash([3*uPlot.pxRatio,3*uPlot.pxRatio]);ctx.strokeRect(left,bbox.top,right-left,bbox.height);ctx.restore()}]}}}
+function alignRoutes(u:uPlot){const left=u.bbox.left/uPlot.pxRatio,right=Math.max(0,u.width-(u.bbox.left+u.bbox.width)/uPlot.pxRatio);routeView.align(left,right);interfaceView.align(left,right)}
+function routeSelectionPlugin():uPlot.Plugin{return{hooks:{ready:[alignRoutes],setSize:[alignRoutes],draw:[u=>{
+  recordDomain(u);
+  for(const [selection,color]of [[routeSelection,"255,199,104"],[interfaceSelection,"177,140,255"]] as const){
+    if(!selection)continue;
+    const {ctx,bbox}=u,left=Math.max(bbox.left,u.valToPos(selection.from/1000,"x",true)),right=Math.min(bbox.left+bbox.width,u.valToPos(selection.to/1000,"x",true));
+    if(right<=left)continue;
+    ctx.save();ctx.fillStyle=`rgba(${color},.09)`;ctx.fillRect(left,bbox.top,right-left,bbox.height);ctx.strokeStyle=`rgba(${color},.6)`;ctx.lineWidth=uPlot.pxRatio;ctx.setLineDash([3*uPlot.pxRatio,3*uPlot.pxRatio]);ctx.strokeRect(left,bbox.top,right-left,bbox.height);ctx.restore();
+  }
+}]}}}
 
 function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:number|undefined,bounds:Bounds,zoom:(from:number,to:number)=>void){
   flameState.points=points;
@@ -155,15 +165,14 @@ function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:nu
   ],plugins:[flameSmokePlugin(flameState),routeSelectionPlugin()],hooks:{setSelect:[u=>{if(u.select.width<8)return;const from=u.posToVal(u.select.left,"x")*1000,to=u.posToVal(u.select.left+u.select.width,"x")*1000;queueMicrotask(()=>zoom(from,to))}]}},data,root);
 }
 
-function graph(el:string,old:uPlot|null,points:any[],fields:string[],labels:string[],colors:string[],bounds:Bounds,max?:number,zoom?:(from:number,to:number)=>void){const data:any[]=[points.map(p=>p.time_ms/1000),...fields.map(f=>points.map(p=>p[f]??null))];const root=$(el),size={width:Math.max(280,root.clientWidth),height:215};if(old){old.scales.x.range=()=>[bounds.from/1000,bounds.to/1000];old.batch(()=>{if(old.width!==size.width||old.height!==size.height)old.setSize(size);old.setData(data as uPlot.AlignedData);old.setScale("x",{min:bounds.from/1000,max:bounds.to/1000})});return old}return new uPlot({...size,legend:{show:true},cursor:{drag:{x:true,y:false}},scales:{x:{auto:false,range:()=>[bounds.from/1000,bounds.to/1000]},y:{range:max?()=>[0,max]:undefined}},axes:[{stroke:"#82949f",grid:{stroke:"#20313a"}},{stroke:"#82949f",grid:{stroke:"#20313a"}}],series:[{},...labels.map((label,i)=>({label,stroke:colors[i],width:1.6}))],hooks:{draw:[recordDomain],setSelect:[u=>{if(!zoom||u.select.width<8)return;const from=u.posToVal(u.select.left,"x")*1000,to=u.posToVal(u.select.left+u.select.width,"x")*1000;queueMicrotask(()=>zoom(from,to))}]}},data,root)}
 function seriesBounds(){if(viewport)return viewport;const to=Date.now();return{to,from:to-ranges[range].duration}}
-function drillDown(from:number,to:number){viewport={from,to};rangeButtons();loadSeries();if(selectedInterface)loadInterface(selectedInterface)}
+function drillDown(from:number,to:number){viewport={from,to};rangeButtons();loadSeries()}
 async function loadSeries(){
+  const requested=seriesBounds(),bounds={from:Math.round(requested.from),to:Math.round(requested.to)},windowKey=viewport?`${viewport.from}:${viewport.to}`:range;
+  interfaceView.load(bounds,windowKey,viewport?900:ranges[range].maxPoints);
   if(!target)return;
-  const bounds=seriesBounds(),windowKey=viewport?`${viewport.from}:${viewport.to}`:range;
   const context=`${target}:${windowKey}`,changed=context!==flameContext;
   const id=++seriesRequest,selected=target,maxPoints=viewport?900:ranges[range].maxPoints;
-  activeBounds=bounds;
   if(changed){
     flameContext=context;
     flame=flameGraph(flame,[],undefined,undefined,bounds,drillDown);
@@ -187,7 +196,15 @@ async function loadSeries(){
   }
 }
 function stat(k:string,v:string){return`<div class="stat"><label>${k}</label><strong>${v}</strong></div>`}
-async function loadInterface(name:string){selectedInterface=name;const bounds=activeBounds??seriesBounds(),maxPoints=viewport?900:ranges[range].maxPoints,id=++interfaceRequest;try{const series=await api(`/api/v1/interfaces/${encodeURIComponent(name)}/series?from=${Math.round(bounds.from)}&to=${Math.round(bounds.to)}&max_points=${maxPoints}`);if(id!==interfaceRequest||name!==selectedInterface)return;const points:any[]=series.points??[];points.forEach((p:any)=>p.reset_marker=p.reset?1:null);$("#interface-title").textContent=name;interfacePlot=graph("#interface-chart",interfacePlot,points,["rx_mbps","tx_mbps","rx_errors","tx_errors","rx_dropped","tx_dropped","rx_missed","reset_marker"],["RX Mbps","TX Mbps","RX errors","TX errors","RX dropped","TX dropped","RX missed","RESET"],["#5bd6d0","#f0a657","#ef6b66","#b18cff","#6e9cc9","#c77d65","#82949f","#ff3158"],bounds,undefined,drillDown)}catch(e){if(id===interfaceRequest&&name===selectedInterface)$("#interface-title").textContent=`${name} · ${(e as Error).message}`}}
-async function refresh(){try{targets=(await api("/api/v1/targets"))??[];renderTargets();if(!target&&targets.length)select(targets[0].id);else if(target){loadSeries()}const ifs:any[]=(await api("/api/v1/interfaces"))??[];const interfaces=$("#interfaces");interfaces.innerHTML=ifs.length?ifs.map((i:any)=>`<button class="row trace-row" data-name="${esc(i.name)}"><strong>${esc(i.display_name)}</strong><span>${i.present?esc(i.mac||"observed"):"missing"}</span></button>`).join(""):"<div class=empty>No interfaces configured</div>";interfaces.querySelectorAll<HTMLButtonElement>("button").forEach(b=>b.onclick=()=>loadInterface(b.dataset.name!));if(selectedInterface)loadInterface(selectedInterface);const status=await api("/api/v1/status");const traceState=Object.entries(status.trace_capabilities??{}).filter(([,v])=>v!=="available"&&v!=="disabled").map(([k,v])=>`${k} ${v}`);if(status.interface_capability?.startsWith("unavailable"))traceState.push(`interfaces ${status.interface_capability}`);$("#storage").textContent=`Storage ${status.pressure} · ${formatBytes(status.live_bytes)} live · ${status.dirty_buckets} dirty buckets${traceState.length?" · "+traceState.join(" · "):""}`;$("#health").textContent=status.ready?"ready":"paused";$("#health").className=status.ready?"pill ready":"pill";$("#health").title=status.writer_error||`${formatBytes(status.available_bytes)} filesystem space available`}catch{$("#health").textContent="unavailable";$("#health").className="pill"}}
+async function refresh(){
+  try{
+    targets=(await api("/api/v1/targets"))??[];renderTargets();
+    if(!target&&targets.length)select(targets[0].id);else loadSeries();
+    const status=await api("/api/v1/status");interfaceView.setCapability(status.interface_capability??"");
+    const traceState=Object.entries(status.trace_capabilities??{}).filter(([,v])=>v!=="available"&&v!=="disabled").map(([k,v])=>`${k} ${v}`);
+    $("#storage").textContent=`Storage ${status.pressure} · ${formatBytes(status.live_bytes)} live · ${status.dirty_buckets} dirty buckets${traceState.length?" · "+traceState.join(" · "):""}`;
+    $("#health").textContent=status.ready?"ready":"paused";$("#health").className=status.ready?"pill ready":"pill";$("#health").title=status.writer_error||`${formatBytes(status.available_bytes)} filesystem space available`;
+  }catch{$("#health").textContent="unavailable";$("#health").className="pill"}
+}
 function formatBytes(n:number){for(const[u,v]of[["TiB",2**40],["GiB",2**30],["MiB",2**20]] as [string,number][]){if(n>=v)return(n/v).toFixed(1)+" "+u}return n+" B"}
-rangeButtons();refresh();setInterval(refresh,5000);addEventListener("resize",()=>{loadSeries();if(selectedInterface)loadInterface(selectedInterface)});
+rangeButtons();refresh();setInterval(refresh,5000);addEventListener("resize",()=>{loadSeries()});

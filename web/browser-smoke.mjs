@@ -8,7 +8,7 @@ const dist = new URL("../internal/webui/dist/", import.meta.url).pathname;
 const json = value => JSON.stringify(value);
 let status = {ready:true, pressure:"normal", live_bytes:0, dirty_buckets:0, available_bytes:1_000_000, trace_capabilities:{ipv4:"disabled",ipv6:"disabled"}, interface_capability:"disabled"};
 let fixtureMode = false;
-let interfacePresetFailureUsed = false;
+let nextInterfaceAction = "", nextInterfacesAction = "", interfaceMode = "normal", delayedInterface = 0;
 let interfaceZoomFailureUsed = false;
 let interfaceZoomFailureArmed = false;
 const requestLog = [];
@@ -94,7 +94,7 @@ function routeFixture(target, from, to, maxPoints) {
 function fixtureResponse(url) {
   const path = url.pathname;
   if (path === "/api/v1/targets") return fixtures.targets;
-  if (path === "/api/v1/interfaces") return fixtures.interfaces;
+  if (path === "/api/v1/interfaces") return (interfaceMode === "empty" ? [] : interfaceMode === "normal" ? fixtures.interfaces : fixtures.interfaces.slice(0,1)).map(info=>({...info,ifindex:2,last_at_ms:Date.now()-5000}));
   if (/^\/api\/v1\/targets\/[^/]+\/ping$/.test(path)) {
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
@@ -111,13 +111,23 @@ function fixtureResponse(url) {
       {ttl:2,index:1},{ttl:2,index:2,responder:"2001:db8:1234:5678:90ab:cdef:1234:5678",rtt_ms:0,icmp_type:3,icmp_code:3},
     ]};
   }
-  if (path === "/api/v1/interfaces/eth0/series") {
-    const from = Number(url.searchParams.get("from"));
-    const to = Number(url.searchParams.get("to"));
-    return {points:[
-      {time_ms:from,rx_mbps:10,tx_mbps:2,rx_errors:0,tx_errors:0,rx_dropped:0,tx_dropped:0,rx_missed:0,reset:false},
-      {time_ms:to,rx_mbps:14,tx_mbps:3,rx_errors:1,tx_errors:0,rx_dropped:0,tx_dropped:0,rx_missed:0,reset:false},
-    ]};
+  if (/^\/api\/v1\/interfaces\/[^/]+\/series$/.test(path)) {
+    const from=Number(url.searchParams.get("from")),to=Number(url.searchParams.get("to"));
+    const bucket_ms=Math.ceil((to-from)/15/1000)*1000;
+    const points=[];
+    for(let at=Math.floor(from/bucket_ms)*bucket_ms,i=0;at<to;at+=bucket_ms,i++){
+      if(i===12||i===13||i===14)continue;
+      const p={time_ms:at,rx_mbps:10+i/3,tx_mbps:2+i/8,has_deltas:i!==11,reset_count:i===11?1:0,partial:at<from||at+bucket_ms>to,
+        rx_errors:0,tx_errors:0,rx_dropped:0,tx_dropped:0,rx_missed:0,rx_fifo:0,tx_fifo:0,rx_crc:0,rx_frame:0,tx_carrier:0,collisions:0};
+      if(i===4){p.rx_errors=7;p.rx_crc=3;p.tx_fifo=2;}
+      if(i===8){p.rx_dropped=12;p.rx_missed=5;}
+      if(interfaceMode==="quiet"){for(const field of ["rx_errors","rx_crc","tx_fifo","rx_dropped","rx_missed","reset_count"])p[field]=0;}
+      if(interfaceMode==="diagnostic"){p.rx_errors=0;p.rx_dropped=0;p.rx_missed=0;p.reset_count=0;}
+      if(path.includes("wan0")){p.has_deltas=false;if(i!==11)continue;}
+      points.push(p);
+    }
+    const resets=points.filter(p=>p.reset_count).map(p=>({at_ms:p.time_ms+1000,reason:path.includes("wan0")?"interface_missing":"counter_decreased"}));
+    return {name:path.split("/").at(-2),as_of_ms:Date.now(),bucket_ms,source_resolution_ms:60_000,points,resets,resets_truncated:false};
   }
   return undefined;
 }
@@ -157,10 +167,10 @@ const automation = `<script>
     }
     document.querySelector("#targets button[data-id=backup]").click();
     await wait(300);
-    document.querySelector("#interfaces button[data-name=eth0]").click();
-    await wait(300);
+    await until(()=>document.querySelector("#interface-title").textContent === "eth0");
+    await control({interface:"failure"});
     [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "1h").click();
-    await until(() => document.querySelector("#interface-title").textContent.includes("injected interface failure"));
+    await until(() => document.querySelector("#interface-detail-status").textContent.includes("history unavailable"));
     [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "24h").click();
     await until(() => document.querySelector("#interface-title").textContent === "eth0");
     await routeReady();
@@ -292,6 +302,63 @@ const automation = `<script>
     over.dispatchEvent(hover);
     await until(() => [p99,max,late].every(row => row.querySelector(".u-value")?.textContent !== "--"));
     p99.querySelector("th").click();
+    document.body.dataset.smokeStage = "interface overview";
+    const interfaceRoot=()=>document.querySelector("#interface-history");
+    const interfaceReady=()=>until(()=>!interfaceRoot().hasAttribute("aria-busy")&&document.querySelector("#interfaces [data-interface]"),"interface overview");
+    const interfaceBuckets=(name="eth0")=>[...document.querySelectorAll('#interfaces [data-interface="'+name+'"] .interface-bucket')];
+    const reloadInterfaces=async()=>{const active=document.querySelector("#ranges .active")?.textContent;[...document.querySelectorAll("#ranges button")].find(b=>b.textContent===(active==="24h"?"6h":"24h")).click();await interfaceReady();};
+    await interfaceReady();
+    assert(!document.querySelector("#interface-details").hidden&&document.querySelector("#interface-title").textContent==="eth0","interface detail did not open automatically");
+    assert(document.querySelector("#interface-alert").getBoundingClientRect().top<document.querySelector("#flame").getBoundingClientRect().top,"interface warning is not above graphs");
+    assert(document.querySelector("#interface-alert").textContent.includes("2 interfaces with recorded signals"),"host summary omits signals on other interfaces");
+    const ifBox=document.querySelector(".interface-track").getBoundingClientRect(),pingBox=document.querySelector("#flame .u-over").getBoundingClientRect();
+    assert(Math.abs(ifBox.left-pingBox.left)<2&&Math.abs(ifBox.right-pingBox.right)<2,"interface track not horizontally aligned");
+    const firstBox=interfaceBuckets()[0].getBoundingClientRect(),lastBox=interfaceBuckets().at(-1).getBoundingClientRect();
+    assert(Math.abs(firstBox.left-ifBox.left)<2&&Math.abs(lastBox.right-ifBox.right)<2&&lastBox.left>firstBox.right,"interface bucket geometry blocked by production CSP");
+    interfaceBuckets()[0].focus();key("ArrowRight");assert(document.activeElement===interfaceBuckets()[1],"interface arrow navigation failed");key("End");assert(document.activeElement===interfaceBuckets().at(-1),"interface End navigation failed");key("Home");assert(interfaceBuckets().filter(b=>b.tabIndex===0).length===1,"interface roving tab stop invalid");
+    interfaceBuckets()[4].click();
+    assert(document.activeElement===document.querySelector("#interface-title"),"interface selection did not focus the visible detail");
+    assert(document.querySelector("#interface-counts").textContent.includes("RX 7")&&document.querySelector("#interface-diagnostics").textContent.includes("RX CRC 3"),"error and overlapping diagnostic increments missing");
+    const selectedInterfaceCounts=document.querySelector("#interface-counts").innerHTML;
+    document.querySelector("#interface-specifics").open=true;
+    await wait(5500);
+    assert(document.querySelector("#interface-counts").innerHTML===selectedInterfaceCounts&&document.querySelector("#interface-detail-status").textContent.includes("snapshot")&&document.querySelector("#interface-specifics").open,"interface polling replaced selected details");
+    await control({interfaces:"failure"});await until(()=>document.querySelector("#interface-alert").textContent.includes("unavailable"),"transient interface list failure");
+    assert(!document.querySelector("#interface-details").hidden&&document.querySelector("#interface-counts").innerHTML===selectedInterfaceCounts&&document.querySelector("#interface-detail-status").textContent.includes("snapshot")&&document.querySelector("#interface-alert").textContent.includes("unavailable"),"transient list failure discarded selected evidence");
+    await until(()=>!document.querySelector("#interface-alert").textContent.includes("unavailable")&&!interfaceRoot().hasAttribute("aria-busy"),"interface list recovery");await interfaceReady();
+    assert(document.querySelector("#interface-counts").innerHTML===selectedInterfaceCounts&&document.querySelector("#interface-specifics").open,"list recovery discarded snapshot or disclosure");
+    interfaceBuckets()[11].click();
+    assert(document.querySelector("#interface-detail-status").textContent.includes("values are unknown")&&document.querySelector("#interface-counts").textContent.includes("RX —")&&document.querySelector("#interface-resets").textContent.includes("Counter decreased"),"reset-only interval implies observed zero or hides reason");
+    interfaceBuckets()[12].click();
+    assert(document.querySelector("#interface-detail-status").textContent.includes("No counter interval recorded")&&interfaceBuckets()[12].classList.contains("no-deltas"),"empty interval implies zero counters");
+    document.querySelector('#interfaces [data-name="wan0"]').click();
+    assert(document.querySelector("#interface-chart").dataset.observed==="0"&&document.querySelector("#interface-identity").textContent.includes("Missing / unobserved"),"missing interface implies observed traffic or link up");
+    document.querySelector('#interfaces [data-name="eth0"]').click();interfaceBuckets()[4].click();
+    const interfaceSelection={from:Number(interfaceBuckets()[4].dataset.from),to:Number(interfaceBuckets()[4].dataset.to)};
+    document.querySelector("#interface-zoom").click();await interfaceReady();await alignedDomains(true);
+    assert(Math.abs(Number(interfaceRoot().dataset.from)-interfaceSelection.from)<=1&&Math.abs(Number(interfaceRoot().dataset.to)-interfaceSelection.to)<=1,"interface zoom did not synchronize all graphs");
+    assert(interfaceBuckets().length<=180,"interface zoom created subpixel button density");
+    await control({interfaceMode:"single"});await reloadInterfaces();
+    assert(!document.querySelector("#interfaces .interface-name")&&!document.querySelector("#interface-details").hidden,"single interface still requires a name click");
+    await control({interfaceMode:"diagnostic"});await reloadInterfaces();
+    assert(!document.querySelector("#interface-diagnostics").hidden&&document.querySelector("#interface-diagnostics").textContent.includes("RX CRC 3")&&document.querySelector("#interface-counts").textContent.includes("RX 0"),"diagnostic-only anomaly is hidden under zero error totals");
+    await control({interface:"failure"});await reloadInterfaces();
+    assert(document.querySelector("#interface-detail-status").textContent.includes("unavailable")&&document.querySelector("#interface-chart").dataset.observed==="0"&&[...document.querySelectorAll("#interface-counts strong")].every(e=>e.textContent.includes("—")),"failed request retained traffic or false zero counters");
+    await control({interfaces:"failure"});
+    const activeRange=document.querySelector("#ranges .active")?.textContent;
+    [...document.querySelectorAll("#ranges button")].find(b=>b.textContent===(activeRange==="24h"?"6h":"24h")).click();
+    await until(()=>document.querySelector("#interface-status").textContent.includes("Could not load interfaces"));await wait(200);
+    assert(document.querySelector("#interface-alert").textContent.includes("unavailable")&&!document.querySelector("#interface-alert").textContent.includes("No interfaces configured"),"list failure became an empty configuration after status refresh");
+    await control({interfaceMode:"quiet"});await reloadInterfaces();
+    assert(document.querySelector("#interface-alert").textContent.includes("No counter signals recorded"),"observed quiet window is mislabeled");
+    const beforeInterface=await control({interface:"delay"});
+    const rangeBeforeDelay=document.querySelector("#ranges .active")?.textContent;
+    [...document.querySelectorAll("#ranges button")].find(b=>b.textContent===(rangeBeforeDelay==="24h"?"6h":"24h")).click();
+    await until(async()=>(await control({})).delayedInterface>beforeInterface.delayedInterface,"delayed interface request");
+    await control({interfaceMode:"diagnostic"});await reloadInterfaces();await fetch("/__smoke/settled");
+    assert(document.querySelector("#interface-diagnostics").textContent.includes("RX CRC 3")&&!document.querySelector("#interface-diagnostics").hidden,"stale interface response overwrote new window");
+    await control({interfaceMode:"normal"});await reloadInterfaces();await routeReady();await alignedDomains(true);
+    document.body.dataset.interfaceChecks="true";
     document.body.dataset.smokeStage = "refresh persistence";
     await routeReady(); await inspectDense(); showChange();
     document.querySelector(".route-trace-list").open = true;
@@ -329,6 +396,11 @@ const screenshotAutomation = `<script>
       await until(()=>document.querySelector("#trace-detail").textContent.includes("203.0.113.9"));
       document.querySelector("#route-history").scrollIntoView();
     }
+    if(new URL(location.href).searchParams.get("screenshot") === "interfaces"){
+      await until(()=>document.querySelector("#interface-next:not(:disabled)")&&!document.querySelector("#interface-history").hasAttribute("aria-busy"));
+      document.querySelector("#interface-next").click();document.querySelector("#interface-specifics").open=true;
+      document.querySelector("#interface-details").scrollIntoView();
+    }
     if (document.documentElement.scrollWidth > innerWidth) throw new Error("route inspector overflows viewport");
     await wait(200);
     document.body.dataset.screenshotReady = "true";
@@ -340,14 +412,22 @@ const screenshotAutomation = `<script>
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
   const path = url.pathname;
+  response.setHeader("Content-Security-Policy","default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  if(path === "/__smoke/automation.js" || path === "/__smoke/screenshot.js"){
+    response.writeHead(200,{"content-type":"text/javascript"});
+    response.end((path.includes("screenshot")?screenshotAutomation:automation).replace(/^<script>/,"").replace(/<\/script>$/, ""));return;
+  }
   if (path === "/__smoke/control") {
     if (url.searchParams.has("mode")) { routeMode = url.searchParams.get("mode"); routeWindows.clear(); }
     if (url.searchParams.has("history")) nextHistoryAction = url.searchParams.get("history");
     if (url.searchParams.has("trace")) nextTraceAction = url.searchParams.get("trace");
     if (url.searchParams.has("ping")) nextPingAction = url.searchParams.get("ping");
     if (url.searchParams.has("interfaceZoom")) interfaceZoomFailureArmed = true;
+    if (url.searchParams.has("interface")) nextInterfaceAction=url.searchParams.get("interface");
+    if (url.searchParams.has("interfaces")) nextInterfacesAction=url.searchParams.get("interfaces");
+    if (url.searchParams.has("interfaceMode")) interfaceMode=url.searchParams.get("interfaceMode");
     response.writeHead(200, {"content-type":"application/json"});
-    response.end(json({delayedHistory,delayedTrace}));
+    response.end(json({delayedHistory,delayedTrace,delayedInterface}));
     return;
   }
   if (path === "/__smoke/last-history") {
@@ -365,14 +445,7 @@ const server = createServer(async (request, response) => {
   if (fixtureMode && path === "/api/v1/interfaces/eth0/series") {
     const maxPoints = Number(url.searchParams.get("max_points"));
     const logged = {path, from:Number(url.searchParams.get("from")), to:Number(url.searchParams.get("to")), maxPoints};
-    if (maxPoints === 61 && !interfacePresetFailureUsed) {
-      interfacePresetFailureUsed = true;
-      requestLog.push(logged);
-      response.writeHead(500, {"content-type":"text/plain"});
-      response.end("injected interface failure");
-      return;
-    }
-    if (maxPoints === 900 && interfaceZoomFailureArmed && !interfaceZoomFailureUsed) {
+    if (Number(url.searchParams.get("to"))-Number(url.searchParams.get("from")) < 23*3600e3 && interfaceZoomFailureArmed && !interfaceZoomFailureUsed) {
       interfaceZoomFailureUsed = true;
       requestLog.push(logged);
       await new Promise(resolve => setTimeout(resolve, 800));
@@ -387,7 +460,9 @@ const server = createServer(async (request, response) => {
       requestLog.push({path, from:Number(url.searchParams.get("from")), to:Number(url.searchParams.get("to")), maxPoints:Number(url.searchParams.get("max_points"))});
       const isHistory = path.endsWith("/route-history"), isTrace = /^\/api\/v1\/traces\/\d+$/.test(path), isPing = path.endsWith("/ping");
       if (isHistory) lastHistory = fixture;
-      const action = isHistory ? nextHistoryAction : isTrace ? nextTraceAction : isPing ? nextPingAction : "";
+      const isInterface=path==="/api/v1/interfaces/eth0/series",isInterfaces=path==="/api/v1/interfaces";
+      const action = isInterface?nextInterfaceAction:isInterfaces?nextInterfacesAction:isHistory ? nextHistoryAction : isTrace ? nextTraceAction : isPing ? nextPingAction : "";
+      if(isInterface)nextInterfaceAction="";if(isInterfaces)nextInterfacesAction="";
       if (isHistory) nextHistoryAction = "";
       if (isTrace) nextTraceAction = "";
       if (isPing) nextPingAction = "";
@@ -395,7 +470,7 @@ const server = createServer(async (request, response) => {
         response.writeHead(isTrace ? 404 : 500, {"content-type":"text/plain"}); response.end(isPing ? "injected ping failure" : "injected route failure"); return;
       }
       if (action === "delay") {
-        if (isHistory) delayedHistory++; else delayedTrace++;
+        if(isInterface)delayedInterface++;else if (isHistory) delayedHistory++; else delayedTrace++;
         const pending = new Promise(resolve=>setTimeout(resolve,250));
         pendingDelays.add(pending); await pending; pendingDelays.delete(pending);
       }
@@ -411,7 +486,7 @@ const server = createServer(async (request, response) => {
   const file = path === "/" ? "index.html" : path.slice(1);
   try {
     let body = await readFile(join(dist, file));
-    if (fixtureMode && file === "index.html") body = Buffer.from(body.toString().replace("</body>", `${url.searchParams.has("screenshot")?screenshotAutomation:automation}</body>`));
+    if (fixtureMode && file === "index.html") body = Buffer.from(body.toString().replace("</body>", `<script src="${url.searchParams.has("screenshot")?"/__smoke/screenshot.js":"/__smoke/automation.js"}"></script></body>`));
     response.writeHead(200, {"content-type":extname(file)===".js"?"text/javascript":extname(file)===".css"?"text/css":"text/html"});
     response.end(body);
   } catch {
@@ -486,12 +561,13 @@ try {
 
   fixtureMode = true;
   status = {...status, ready:true, pressure:"normal", writer_error:undefined};
-  output = await render(25000);
+  output = await render(65000);
   if (!output.includes('data-smoke="complete"')) throw new Error(`fixture workflow did not complete: ${output.match(/data-smoke="([^"]+)/)?.[1]??"no smoke state"}; stage=${output.match(/data-smoke-stage="([^"]+)/)?.[1]??"unknown"}; flame=${output.match(/<div id="flame"[^>]*>/)?.[0]??"missing"}; routes=${output.match(/<section id="route-history"[^>]*>/)?.[0]??"missing"}; interface=${output.match(/<div id="interface-chart"[^>]*>/)?.[0]??"missing"}`);
   if (!output.includes('data-legend-preserved="true"')) throw new Error("chart interaction state was not preserved");
+  if (!output.includes('data-interface-checks="true"')) throw new Error("interface anomaly workflow did not complete");
   if (!output.includes('data-route-checks="true"')) throw new Error("route history workflow did not complete");
-  if (!output.includes('<h3 id="interface-title">eth0</h3>')) throw new Error("interface request failure did not recover or a stale failure replaced current data");
-  for (const text of [">Backup</h2>", ">eth0</h3>", "missing", "203.0.113.9", "192.0.2.3", "198.51.100.2"]) {
+  if (!output.includes('id="interface-title" tabindex="-1">eth0</h4>')) throw new Error("interface request failure did not recover or a stale failure replaced current data");
+  for (const text of [">Backup</h2>", ">eth0</h4>", "missing", "203.0.113.9", "192.0.2.3", "198.51.100.2"]) {
     if (!output.includes(text)) throw new Error(`fixture workflow did not render ${text}`);
   }
 
@@ -505,7 +581,7 @@ try {
   const zoom = day && pings.find(request => request.path === "/api/v1/targets/backup/ping" && request.to-request.from < 23*3600e3 && request.to-request.from > 0 && request.maxPoints === 900);
   if (!day) throw new Error("24h range preset did not requery the series");
   if (!zoom) throw new Error(`chart zoom did not issue a bounded requery: ${JSON.stringify(pings)}`);
-  const interfaceZoom = requestLog.find(request => request.path === "/api/v1/interfaces/eth0/series" && request.maxPoints === 900 && Math.abs(request.from-zoom.from) < 1000 && Math.abs(request.to-zoom.to) < 1000);
+  const interfaceZoom = requestLog.find(request => request.path === "/api/v1/interfaces/eth0/series" && request.maxPoints <= 180 && Math.abs(request.from-zoom.from) < 1000 && Math.abs(request.to-zoom.to) < 1000);
   if (!interfaceZoom) throw new Error(`interface chart did not follow the detailed zoom: ${JSON.stringify(requestLog)}`);
   for (const path of ["/api/v1/targets/backup/ping", "/api/v1/interfaces/eth0/series", "/api/v1/traces/203", "/api/v1/traces/103"]) {
     if (!requestLog.some(request => request.path === path)) throw new Error(`workflow did not request ${path}`);
@@ -527,7 +603,17 @@ try {
     await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_INSPECTOR, 1440, 1400, "inspector");
     console.log(`browser smoke: wrote inspector screenshot to ${process.env.FLAMEPING_SCREENSHOT_INSPECTOR}`);
   }
-  console.log("browser smoke: flame density/loss rail, local gaps, preset/zoom bounds, legend persistence, interface failure recovery; aligned route counts, dense/empty intervals, keyboard navigation, before/after semantics, raw probes, truncation, error retries, stale-response isolation, route zoom, and inspector refresh persistence passed");
+  if(process.env.FLAMEPING_SCREENSHOT_INTERFACES){
+    interfaceMode="single";
+    await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_INTERFACES,1440,1100,"interfaces");
+    console.log(`browser smoke: wrote interface detail screenshot to ${process.env.FLAMEPING_SCREENSHOT_INTERFACES}`);
+  }
+  if(process.env.FLAMEPING_SCREENSHOT_INTERFACE_MOBILE){
+    interfaceMode="single";
+    await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_INTERFACE_MOBILE,390,844,"interfaces");
+    console.log(`browser smoke: wrote mobile interface screenshot to ${process.env.FLAMEPING_SCREENSHOT_INTERFACE_MOBILE}`);
+  }
+  console.log("browser smoke: interface signals, automatic details, diagnostic-only errors, reset/unknown distinctions, zoom, failures, snapshots, CSP geometry; flame density/loss rail, local gaps, preset/zoom bounds, legend persistence, interface failure recovery; aligned route counts, dense/empty intervals, keyboard navigation, before/after semantics, raw probes, truncation, error retries, stale-response isolation, route zoom, and inspector refresh persistence passed");
 } finally {
   server.close();
 }

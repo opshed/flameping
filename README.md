@@ -41,6 +41,8 @@ See [operations.md](docs/operations.md) for deployment and recovery details, [de
 
 This branch experiments with a **Route activity** timeline beneath the latency/loss chart. Warm marks show confirmed route changes; a separate lane shows retained trace observations. Select an interval to compare changed hops and inspect individual probes, or use **Zoom charts here** to align the charts to that interval. See the [research and experiment notes](docs/route-timeline-experiment.md) for alternatives, sources, and interpretation.
 
+**Interface activity** surfaces host counter signals above and alongside the graphs. Aligned lanes show errors, drops/missed packets, and resets; interface details open automatically, including when only one interface is configured. Select an interval for counter specifics and reset reasons, with peak RX/TX traffic on its own scale. See the [interface experiment notes](docs/interface-timeline-experiment.md) for the design and measurement semantics.
+
 ## Development
 
 ```sh
