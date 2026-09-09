@@ -18,6 +18,39 @@ Open `http://127.0.0.1:8080`. The example monitors `1.1.1.1`; edit it before dep
 
 On Linux, unprivileged echo requires the service user's group to fall within `net.ipv4.ping_group_range`. Traceroute reception requires `CAP_NET_RAW` (included in the sample systemd unit) or root. `doctor` reports both capabilities without changing the host.
 
+## Per-target ping settings
+
+The top-level `ping` block supplies defaults. Override individual timing settings
+inside a target's `ping` block:
+
+```yaml
+ping:
+  interval: 5s
+  timeout: 1s
+  min_interval: 100ms
+
+targets:
+  - id: gateway
+    address: 1.1.1.1
+    ping:
+      interval: 1s
+      timeout: 750ms
+      min_interval: 250ms
+    obsess: {}  # Uses this target's 250ms minimum for faster probing.
+  - id: backup
+    address: 9.9.9.9  # Inherits the global ping settings.
+```
+
+Omitted or null settings inherit independently; `ping: {}` inherits all timings.
+Existing target-level `interval` and `timeout` fields remain supported. For each
+field, choose either the direct form or the nested form; specifying both is an
+error. A missing nested field also inherits its existing direct target value.
+
+Each target may raise or lower the default minimum interval, with a hard floor
+of 100ms. Its normal and obsess intervals must satisfy that target's minimum.
+`event_queue`, `send_queue`, and `max_probes_per_second` configure the shared
+engine and remain global. Restart Flameping after editing configuration.
+
 ## Why SQLite works here
 
 One logical writer batches measurements into WAL transactions while up to four read connections serve the UI. Raw samples are rolled into mergeable one-minute and one-hour histograms. Defaults retain raw detail for 7 days, minute detail for 90 days, hourly history for 5 years, and impose a 5 GiB hard database budget. Pruning only removes a raw bucket after its replacement rollup is complete and clean.

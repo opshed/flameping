@@ -7,8 +7,9 @@ or its latency rises. It is opt-in for each target and configured in YAML:
 targets:
   - id: gateway
     address: 1.1.1.1
-    interval: 5s
-    timeout: 1s
+    ping:
+      interval: 5s
+      timeout: 1s
     obsess:
       interval: 100ms
       latency_threshold: 50%
@@ -19,8 +20,11 @@ targets:
 
 `obsess: {}` enables those defaults. Omit the object or use `enabled: false`
 inside it to disable the feature. Restart Flameping after editing configuration.
-The default fast interval respects `ping.min_interval`; it must be shorter than
-the target's normal interval. The ping timeout stays the same in both modes.
+The default fast interval uses the target's effective `ping.min_interval`,
+inherited from global settings unless overridden on that target; it must be
+shorter than the target's normal interval. Per-target `ping.interval`,
+`ping.timeout`, and `ping.min_interval` override independently. The ping timeout
+stays the same in both modes. See the [configuration example](../README.md#per-target-ping-settings).
 
 ## Brainstorming and decisions
 

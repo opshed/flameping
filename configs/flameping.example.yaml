@@ -30,6 +30,11 @@ targets:
     address: 1.1.1.1
     family: auto
     traceroute: true
+    # Optional per-target timing overrides; omitted fields inherit global ping.
+    # ping:
+    #   interval: 1s
+    #   timeout: 500ms
+    #   min_interval: 100ms
     # Optional: temporarily probe faster after loss or a latency spike.
     # obsess:
     #   interval: 100ms

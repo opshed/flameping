@@ -89,14 +89,24 @@ type DNSConfig struct {
 }
 
 type TargetConfig struct {
-	ID         string        `yaml:"id"`
-	Name       string        `yaml:"name"`
-	Address    string        `yaml:"address"`
-	Family     string        `yaml:"family"`
-	Interval   Duration      `yaml:"interval"`
-	Timeout    Duration      `yaml:"timeout"`
-	Traceroute *bool         `yaml:"traceroute"`
-	Obsess     *ObsessConfig `yaml:"obsess"`
+	ID         string            `yaml:"id"`
+	Name       string            `yaml:"name"`
+	Address    string            `yaml:"address"`
+	Family     string            `yaml:"family"`
+	Interval   Duration          `yaml:"interval"`
+	Timeout    Duration          `yaml:"timeout"`
+	Ping       *TargetPingConfig `yaml:"ping"`
+	Traceroute *bool             `yaml:"traceroute"`
+	Obsess     *ObsessConfig     `yaml:"obsess"`
+}
+
+// TargetPingConfig overrides timing independently for a single target. Queue
+// capacities and the aggregate probe budget belong to the shared ping engine.
+// Pointers distinguish omitted settings from explicitly invalid zero values.
+type TargetPingConfig struct {
+	Interval    *Duration `yaml:"interval"`
+	Timeout     *Duration `yaml:"timeout"`
+	MinInterval *Duration `yaml:"min_interval"`
 }
 
 // MaxObsessStateSlots bounds the configured probe and latency history retained
@@ -142,7 +152,7 @@ func (t TargetConfig) EffectiveObsess(c Config) *ObsessConfig {
 	}
 	o := *t.Obsess
 	if o.Interval == 0 && !o.present["interval"] {
-		o.Interval = Duration(max(100*time.Millisecond, c.Ping.MinInterval.Value()))
+		o.Interval = Duration(max(100*time.Millisecond, t.EffectiveMinInterval(c)))
 	}
 	if o.LatencyThreshold == "" && !o.present["latency_threshold"] {
 		o.LatencyThreshold = "50%"
@@ -178,6 +188,9 @@ func (o ObsessConfig) Threshold() (absolute time.Duration, relativePercent float
 }
 
 func (t TargetConfig) EffectiveInterval(c Config) time.Duration {
+	if t.Ping != nil && t.Ping.Interval != nil {
+		return t.Ping.Interval.Value()
+	}
 	if t.Interval > 0 {
 		return t.Interval.Value()
 	}
@@ -185,10 +198,20 @@ func (t TargetConfig) EffectiveInterval(c Config) time.Duration {
 }
 
 func (t TargetConfig) EffectiveTimeout(c Config) time.Duration {
+	if t.Ping != nil && t.Ping.Timeout != nil {
+		return t.Ping.Timeout.Value()
+	}
 	if t.Timeout > 0 {
 		return t.Timeout.Value()
 	}
 	return c.Ping.Timeout.Value()
+}
+
+func (t TargetConfig) EffectiveMinInterval(c Config) time.Duration {
+	if t.Ping != nil && t.Ping.MinInterval != nil {
+		return t.Ping.MinInterval.Value()
+	}
+	return c.Ping.MinInterval.Value()
 }
 
 func (t TargetConfig) TraceEnabled(global bool) bool {
@@ -356,8 +379,23 @@ func (c Config) Validate() error {
 		}
 		interval := t.EffectiveInterval(c)
 		timeout := t.EffectiveTimeout(c)
-		if interval < c.Ping.MinInterval.Value() {
-			errs = append(errs, fmt.Errorf("%s.interval must be at least %s", prefix, c.Ping.MinInterval))
+		minimum := t.EffectiveMinInterval(c)
+		if t.Interval < 0 || t.Timeout < 0 {
+			errs = append(errs, fmt.Errorf("%s.interval and timeout cannot be negative", prefix))
+		}
+		if t.Ping != nil {
+			if t.Ping.Interval != nil && t.Interval != 0 {
+				errs = append(errs, fmt.Errorf("%s: specify interval either directly or under ping, not both", prefix))
+			}
+			if t.Ping.Timeout != nil && t.Timeout != 0 {
+				errs = append(errs, fmt.Errorf("%s: specify timeout either directly or under ping, not both", prefix))
+			}
+		}
+		if minimum < 100*time.Millisecond {
+			errs = append(errs, fmt.Errorf("%s.ping.min_interval must be at least 100ms", prefix))
+		}
+		if interval <= 0 || interval < minimum {
+			errs = append(errs, fmt.Errorf("%s ping interval must be positive and at least %s", prefix, minimum))
 		}
 		if timeout <= 0 || timeout >= c.Storage.RawRetention.Value() {
 			errs = append(errs, fmt.Errorf("%s.timeout must be positive and shorter than raw_retention", prefix))
@@ -366,8 +404,8 @@ func (c Config) Validate() error {
 		if o := t.EffectiveObsess(c); o != nil {
 			obsessEnabled = true
 			fast := o.Interval.Value()
-			if fast < c.Ping.MinInterval.Value() || fast <= 0 {
-				errs = append(errs, fmt.Errorf("%s.obsess.interval must be at least %s", prefix, c.Ping.MinInterval))
+			if fast < minimum || fast <= 0 {
+				errs = append(errs, fmt.Errorf("%s.obsess.interval must be at least %s", prefix, minimum))
 			}
 			if fast >= interval {
 				errs = append(errs, fmt.Errorf("%s.obsess.interval must be faster than the normal interval", prefix))

@@ -100,8 +100,9 @@ targets:
     name: Gateway
     address: 192.0.2.1
     family: auto
-    interval: 1s
-    timeout: 500ms
+    ping:
+      interval: 1s
+      timeout: 500ms
     traceroute: true
 
 interfaces:
