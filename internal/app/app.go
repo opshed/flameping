@@ -105,8 +105,10 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 		configured[target.ID] = target
 	}
 	var obsessTargets []obsess.Target
+	obsessLogTargets := make(map[int64]sqlite.Target)
 	for _, item := range resolved {
 		if options := configured[item.target.StableID].EffectiveObsess(cfg); options != nil {
+			obsessLogTargets[item.target.ID] = item.target
 			obsessTargets = append(obsessTargets, obsess.Target{
 				ID: item.target.ID, Endpoint: item.endpoint, Interval: item.target.Interval, Config: options,
 			})
@@ -116,9 +118,9 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	if len(obsessTargets) > 0 {
 		controller, err = obsess.New(clockpkg.New(), obsessTargets,
 			func(id int64, interval time.Duration) { sched.UpdateInterval(id, interval) },
-			func(id int64, state obsess.Status) {
-				logger.Info("target obsess state changed", "target_id", id, "state", state.State,
-					"reason", state.Reason, "interval_ms", state.IntervalMS, "threshold_ms", state.ThresholdMS)
+			func(change obsess.Transition) {
+				target := obsessLogTargets[change.TargetID]
+				logObsessTransition(logger, target, configured[target.StableID].EffectiveObsess(cfg), change)
 			})
 		if err != nil {
 			return fmt.Errorf("configure obsess: %w", err)

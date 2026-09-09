@@ -114,9 +114,16 @@ func (h *deadlineHeap) Pop() any {
 	return p
 }
 
-type transition struct {
-	id     int64
-	status Status
+// Transition captures evidence at the state change. Consumers must use this
+// snapshot rather than looking up mutable endpoint or probe state later.
+type Transition struct {
+	TargetID int64
+	Status   Status
+	Endpoint netip.Addr
+	Reason   string
+	At       time.Time
+	// Trigger is a private copy of the entering probe, absent on recovery/reset.
+	Trigger *model.ProbeEvent
 }
 
 type Controller struct {
@@ -130,14 +137,14 @@ type Controller struct {
 	wake       chan struct{}
 	running    bool
 	change     func(int64, time.Duration)
-	transition func(int64, Status)
+	transition func(Transition)
 }
 
 // New expects effective, validated obsess settings. change is called while the
 // controller lock is held to preserve ordering between concurrent transitions;
 // it must be nonblocking and must not call back into Controller. transition runs
 // outside that lock and may read snapshots; it should do only lightweight work.
-func New(clock clockpkg.Clock, targets []Target, change func(int64, time.Duration), onTransition func(int64, Status)) (*Controller, error) {
+func New(clock clockpkg.Clock, targets []Target, change func(int64, time.Duration), onTransition func(Transition)) (*Controller, error) {
 	if clock == nil {
 		clock = clockpkg.New()
 	}
@@ -252,7 +259,7 @@ func (c *Controller) BeginProbe(event model.ProbeEvent) {
 func (c *Controller) CompleteProbe(key model.ProbeKey, success bool) {
 	c.mu.Lock()
 	p := c.probes[key]
-	var changes []transition
+	var changes []Transition
 	if p != nil && !p.accepted {
 		p.accepted = true
 		if !success {
@@ -272,7 +279,7 @@ func (c *Controller) CompleteProbe(key model.ProbeKey, success bool) {
 func (c *Controller) ObserveReply(event model.ProbeEvent) {
 	c.mu.Lock()
 	p := c.probes[event.Key]
-	var changes []transition
+	var changes []Transition
 	if p != nil && sameResponder(p.event.Endpoint, event.Responder) && event.RTT >= 0 {
 		if !p.accepted {
 			if p.early == nil {
@@ -305,7 +312,7 @@ func (c *Controller) ObserveGap(gap model.SchedulerGap) {
 func (c *Controller) UpdateEndpoint(id int64, endpoint netip.Addr) {
 	c.mu.Lock()
 	t := c.targets[id]
-	var changes []transition
+	var changes []Transition
 	if t != nil && t.target.Endpoint != endpoint {
 		t.target.Endpoint = endpoint
 		for p := t.head; p != nil; p = p.next {
@@ -323,7 +330,7 @@ func (c *Controller) UpdateEndpoint(id int64, endpoint netip.Addr) {
 		t.baseline, t.baselineCount, t.threshold, t.hasThreshold = 0, 0, 0, false
 		t.healthySince, t.healthyThrough, t.lastBad = time.Time{}, time.Time{}, time.Time{}
 		if wasActive {
-			changes = append(changes, c.changed(t))
+			changes = append(changes, c.changed(t, "endpoint_changed", c.clock.Now(), nil))
 		}
 		c.signal()
 	}
@@ -344,9 +351,11 @@ func (c *Controller) Snapshot(id int64) (Status, bool) {
 	return c.status(t), true
 }
 
-func (c *Controller) reply(p *probe, event model.ProbeEvent) []transition {
-	var changes []transition
+func (c *Controller) reply(p *probe, event model.ProbeEvent) []Transition {
+	var changes []Transition
 	good := true
+	p.event.RTT, p.event.ReplyClass, p.event.Responder = event.RTT, event.ReplyClass, event.Responder
+	p.event.ICMPType, p.event.ICMPCode = event.ICMPType, event.ICMPCode
 	p.event.ReplyAt = event.ReplyAt
 	if p.event.ReplyAt.IsZero() {
 		p.event.ReplyAt = c.clock.Now()
@@ -367,8 +376,8 @@ func (c *Controller) reply(p *probe, event model.ProbeEvent) []transition {
 	return append(changes, c.finish(p, good, float64(event.RTT))...)
 }
 
-func (c *Controller) expire(now time.Time) []transition {
-	var changes []transition
+func (c *Controller) expire(now time.Time) []Transition {
+	var changes []Transition
 	for len(c.deadlines) > 0 && !c.deadlines[0].deadline().After(now) {
 		p := c.deadlines[0]
 		changes = append(changes, c.fault(p, "loss", p.deadline())...)
@@ -377,7 +386,7 @@ func (c *Controller) expire(now time.Time) []transition {
 	return changes
 }
 
-func (c *Controller) fault(p *probe, reason string, at time.Time) []transition {
+func (c *Controller) fault(p *probe, reason string, at time.Time) []Transition {
 	t := p.target
 	first := !t.active
 	if first {
@@ -388,7 +397,7 @@ func (c *Controller) fault(p *probe, reason string, at time.Time) []transition {
 	}
 	c.interrupt(t, at)
 	if first {
-		return []transition{c.changed(t)}
+		return []Transition{c.changed(t, reason, at, &p.event)}
 	}
 	return nil
 }
@@ -403,7 +412,7 @@ func (c *Controller) interrupt(t *targetState, at time.Time) {
 	}
 }
 
-func (c *Controller) finish(p *probe, good bool, rtt float64) []transition {
+func (c *Controller) finish(p *probe, good bool, rtt float64) []Transition {
 	p.done, p.good, p.rtt, p.early = true, good, rtt, nil
 	delete(c.probes, p.event.Key)
 	if p.heapIndex >= 0 {
@@ -411,7 +420,7 @@ func (c *Controller) finish(p *probe, good bool, rtt float64) []transition {
 		c.signal()
 	}
 	t := p.target
-	var changes []transition
+	var changes []Transition
 	for t.head != nil && t.head.done {
 		next := t.head
 		t.head = next.next
@@ -456,7 +465,7 @@ func (c *Controller) finish(p *probe, good bool, rtt float64) []transition {
 				t.active, t.trackingLimited = false, false
 				t.reason, t.since = "", time.Time{}
 				t.healthySince, t.healthyThrough = time.Time{}, time.Time{}
-				changes = append(changes, c.changed(t))
+				changes = append(changes, c.changed(t, "recovered", c.clock.Now(), nil))
 			}
 		} else {
 			c.addSample(t, sample{sentAt: next.event.SentAt, rtt: next.rtt})
@@ -577,7 +586,7 @@ func (c *Controller) status(t *targetState) Status {
 	return s
 }
 
-func (c *Controller) changed(t *targetState) transition {
+func (c *Controller) changed(t *targetState, reason string, at time.Time, trigger *model.ProbeEvent) Transition {
 	status := c.status(t)
 	if c.change != nil {
 		interval := t.target.Interval
@@ -586,13 +595,19 @@ func (c *Controller) changed(t *targetState) transition {
 		}
 		c.change(t.target.ID, interval)
 	}
-	return transition{id: t.target.ID, status: status}
+	result := Transition{TargetID: t.target.ID, Status: status, Endpoint: t.target.Endpoint, Reason: reason, At: at}
+	if trigger != nil {
+		copy := *trigger
+		result.Trigger = &copy
+		result.Endpoint = copy.Endpoint
+	}
+	return result
 }
 
-func (c *Controller) emit(changes []transition) {
+func (c *Controller) emit(changes []Transition) {
 	if c.transition != nil {
 		for _, change := range changes {
-			c.transition(change.id, change.status)
+			c.transition(change)
 		}
 	}
 }

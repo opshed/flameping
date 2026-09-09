@@ -99,6 +99,37 @@ five-second dashboard poll. `/api/v1/targets` adds an `obsess` object for enable
 targets; `interval_ms` on the target remains the configured normal cadence, while
 `obsess.interval_ms` is the live requested cadence.
 
+Transition logs identify the target using its configured string `target_id`,
+display name (`target_name`), configured hostname/address (`target_address`), and
+the actual resolved destination (`target_ip`). Entering logs distinguish a
+`timeout`, a `late_reply`, and a `latency_spike`, with the probe sequence, send
+time, deadline, and timeout. Received replies also include their RTT. Latency
+entries show the frozen threshold and available pre-event average, sample count,
+configured rule, and percentage rise when available. Relative rules without enough baseline
+samples explain that condition; unknown RTTs and thresholds are omitted.
+
+For example, a timeout entry includes these fields:
+
+```json
+{
+  "msg": "target started obsessing",
+  "target_id": "wan-check",
+  "target_name": "WAN uplink",
+  "target_address": "edge.example.net",
+  "target_ip": "192.0.2.1",
+  "reason": "loss",
+  "trigger": "timeout",
+  "timeout_ms": 1000,
+  "detail": "No ping reply was observed before the 1000 ms deadline."
+}
+```
+
+`event_at` records the triggering evidence time, which can precede log emission.
+Probe details and the destination IP are captured together, so a DNS update
+cannot relabel an earlier trigger. Exit logs distinguish `recovered` from
+`endpoint_changed`; repeated bad probes within an incident do not produce new
+transition entries.
+
 State is in memory. Restarting or changing a target's resolved address clears
 the incident and baseline and restores normal cadence. Queued work is refreshed
 to the current same-family address; queued work for an obsolete IP family is
