@@ -45,6 +45,11 @@ This branch experiments with a **Route activity** timeline beneath the latency/l
 
 ## Development
 
+Targets can optionally [obsess over loss or latency spikes](docs/obsess-experiment.md):
+temporarily probe faster, then return to their normal interval after a continuous
+healthy period against the saved pre-event threshold. Configure `obsess: {}` on
+a target to try the defaults; live status appears in the dashboard.
+
 ```sh
 make test
 make race

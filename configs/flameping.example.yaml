@@ -30,6 +30,13 @@ targets:
     address: 1.1.1.1
     family: auto
     traceroute: true
+    # Optional: temporarily probe faster after loss or a latency spike.
+    # obsess:
+    #   interval: 100ms
+    #   latency_threshold: 50%  # Or an absolute RTT, e.g. 100ms.
+    #   baseline_window: 1m
+    #   min_samples: 3
+    #   recover_after: 1m
 
 interfaces: []
 # To monitor local network interfaces, replace the empty list above with:

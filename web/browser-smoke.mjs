@@ -20,7 +20,8 @@ let lastHistory;
 
 const fixtures = {
   targets: [
-    {id:"gateway", name:"Gateway", address:"192.0.2.1", endpoint:"192.0.2.1", state:"up", last_rtt_ms:2.4},
+    {id:"gateway", name:"Gateway", address:"192.0.2.1", endpoint:"192.0.2.1", state:"up", last_rtt_ms:2.4,
+      obsess:{enabled:true,monitoring:true,state:"obsessing",interval_ms:100,reason:"loss",baseline_ms:10,threshold_ms:15,baseline_samples:12,healthy_for_ms:20000,recover_after_ms:60000}},
     {id:"backup", name:"Backup", address:"198.51.100.8", endpoint:"198.51.100.8", state:"degraded", last_rtt_ms:18.7},
   ],
   interfaces: [
@@ -152,6 +153,15 @@ const automation = `<script>
     document.body.dataset.smoke = "loaded";
     await until(() => [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "24h"));
     const combined = await until(() => document.querySelector("#targets button[data-id=gateway]") && document.querySelector("#flame .u-over") && document.querySelector("#flame"));
+    const obsessStatus = document.querySelector("#obsess-status");
+    assert(!obsessStatus.hidden && obsessStatus.dataset.state === "obsessing" && obsessStatus.textContent.includes("100 ms") && obsessStatus.textContent.includes("15 ms") && obsessStatus.textContent.includes("20 s / 60 s"), "active obsess details are missing");
+    assert(document.querySelector("#targets button[data-id=gateway] .obsess-badge"), "active target has no obsess badge");
+    await control({obsess:"normal"});
+    await until(()=>obsessStatus.dataset.state === "normal", "live obsess recovery refresh");
+    assert(obsessStatus.textContent.includes("5 s") && !document.querySelector(".obsess-badge"), "normal cadence or badge did not refresh");
+    await control({obsess:"obsessing"});
+    await until(()=>obsessStatus.dataset.state === "obsessing", "live obsess trigger refresh");
+    document.body.dataset.obsessChecks = "true";
     if (document.querySelector("#latency") || document.querySelector("#loss") || document.querySelectorAll("#flame .uplot").length !== 1) throw new Error("latency and loss were not consolidated into one plot");
     if (combined.getAttribute("role") !== "group") throw new Error("combined chart does not preserve legend descendant semantics");
     if (combined.dataset.distributionMethod !== "midpoint_quantiles" || combined.dataset.distributionCap !== "17" || combined.dataset.maxGrains !== "17") throw new Error("distribution metadata or adaptive grains are missing");
@@ -166,6 +176,7 @@ const automation = `<script>
       await alignedDomains();
     }
     document.querySelector("#targets button[data-id=backup]").click();
+    assert(obsessStatus.hidden, "disabled target retained another target's obsess status");
     await wait(300);
     await until(()=>document.querySelector("#interface-title").textContent === "eth0");
     await control({interface:"failure"});
@@ -386,6 +397,14 @@ const screenshotAutomation = `<script>
   addEventListener("load", async () => {
     try {
     await until(() => document.querySelector("#flame[data-flame-rendered=distribution]") && document.querySelector("#targets button[data-id=backup]"));
+    if (new URL(location.href).searchParams.get("screenshot") === "obsess") {
+      document.querySelector("#targets button[data-id=gateway]").click();
+      await until(()=>document.querySelector("#obsess-status[data-state=obsessing]"));
+      if (document.documentElement.scrollWidth > innerWidth) throw new Error("obsess status overflows viewport");
+      scrollTo(0,0);await wait(200);
+      document.body.dataset.screenshotReady = "true";
+      return;
+    }
     document.querySelector("#targets button[data-id=backup]").click();
     await until(() => document.querySelector("#title").textContent === "Backup" && document.querySelector("#flame[data-loss-rail=full-no-rtt]") && document.querySelector("#route-history[data-route-traces='360']:not([aria-busy])"));
     if (new URL(location.href).searchParams.get("screenshot") === "inspector") {
@@ -426,6 +445,10 @@ const server = createServer(async (request, response) => {
     if (url.searchParams.has("interface")) nextInterfaceAction=url.searchParams.get("interface");
     if (url.searchParams.has("interfaces")) nextInterfacesAction=url.searchParams.get("interfaces");
     if (url.searchParams.has("interfaceMode")) interfaceMode=url.searchParams.get("interfaceMode");
+    if (url.searchParams.has("obsess")) {
+      const state=url.searchParams.get("obsess");
+      Object.assign(fixtures.targets[0].obsess,{state,interval_ms:state==="obsessing"?100:5000,healthy_for_ms:state==="obsessing"?20000:0});
+    }
     response.writeHead(200, {"content-type":"application/json"});
     response.end(json({delayedHistory,delayedTrace,delayedInterface}));
     return;
@@ -561,10 +584,11 @@ try {
 
   fixtureMode = true;
   status = {...status, ready:true, pressure:"normal", writer_error:undefined};
-  output = await render(65000);
+  output = await render(80000);
   if (!output.includes('data-smoke="complete"')) throw new Error(`fixture workflow did not complete: ${output.match(/data-smoke="([^"]+)/)?.[1]??"no smoke state"}; stage=${output.match(/data-smoke-stage="([^"]+)/)?.[1]??"unknown"}; flame=${output.match(/<div id="flame"[^>]*>/)?.[0]??"missing"}; routes=${output.match(/<section id="route-history"[^>]*>/)?.[0]??"missing"}; interface=${output.match(/<div id="interface-chart"[^>]*>/)?.[0]??"missing"}`);
   if (!output.includes('data-legend-preserved="true"')) throw new Error("chart interaction state was not preserved");
   if (!output.includes('data-interface-checks="true"')) throw new Error("interface anomaly workflow did not complete");
+  if (!output.includes('data-obsess-checks="true"')) throw new Error("live obsess state workflow did not complete");
   if (!output.includes('data-route-checks="true"')) throw new Error("route history workflow did not complete");
   if (!output.includes('id="interface-title" tabindex="-1">eth0</h4>')) throw new Error("interface request failure did not recover or a stale failure replaced current data");
   for (const text of [">Backup</h2>", ">eth0</h4>", "missing", "203.0.113.9", "192.0.2.3", "198.51.100.2"]) {
@@ -594,6 +618,12 @@ try {
   if (process.env.FLAMEPING_SCREENSHOT) {
     await captureScreenshot(process.env.FLAMEPING_SCREENSHOT, 1440, 1100);
     console.log(`browser smoke: wrote desktop screenshot to ${process.env.FLAMEPING_SCREENSHOT}`);
+  }
+  if (process.env.FLAMEPING_SCREENSHOT_OBSESS) {
+    await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_OBSESS,1440,1100,"obsess");
+  }
+  if (process.env.FLAMEPING_SCREENSHOT_OBSESS_MOBILE) {
+    await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_OBSESS_MOBILE,390,844,"obsess");
   }
   if (process.env.FLAMEPING_SCREENSHOT_MOBILE) {
     await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_MOBILE, 390, 844, "inspector");

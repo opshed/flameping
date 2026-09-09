@@ -56,6 +56,7 @@ type PingSeries struct {
 	TargetID           string      `json:"target_id"`
 	AsOfMS             int64       `json:"as_of_ms"`
 	ResolutionS        int64       `json:"resolution_s"`
+	BucketMS           float64     `json:"bucket_ms"`
 	DistributionMethod string      `json:"distribution_method"`
 	DistributionCap    int         `json:"distribution_cap"`
 	Points             []PingPoint `json:"points"`
@@ -159,9 +160,9 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 		return PingSeries{}, err
 	}
 	desired := seriesPointWidth(to.Sub(from), maxPoints)
-	if desired < time.Duration(intervalNS) {
-		desired = time.Duration(intervalNS)
-	}
+	// A target can temporarily probe faster than its configured normal interval.
+	// Preserve that detail when zooming into raw history, including after restart.
+	desired = roundWidth(max(desired, 100*time.Millisecond), time.Microsecond)
 	sourceResolution := int64(0)
 	pointWidth := desired
 	var rawStart, minuteStart, hourStart sql.NullInt64
@@ -204,7 +205,7 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 	if err := tx.Commit(); err != nil {
 		return PingSeries{}, err
 	}
-	return PingSeries{TargetID: stableID, AsOfMS: asOf.UnixMilli(), ResolutionS: max(1, int64(pointWidth/time.Second)), DistributionMethod: pingDistributionMethod, DistributionCap: pingDistributionCap, Points: points}, nil
+	return PingSeries{TargetID: stableID, AsOfMS: asOf.UnixMilli(), ResolutionS: max(1, int64(pointWidth/time.Second)), BucketMS: float64(pointWidth) / float64(time.Millisecond), DistributionMethod: pingDistributionMethod, DistributionCap: pingDistributionCap, Points: points}, nil
 }
 
 func roundWidth(w, base time.Duration) time.Duration {

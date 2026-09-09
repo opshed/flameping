@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"regexp"
@@ -88,13 +89,92 @@ type DNSConfig struct {
 }
 
 type TargetConfig struct {
-	ID         string   `yaml:"id"`
-	Name       string   `yaml:"name"`
-	Address    string   `yaml:"address"`
-	Family     string   `yaml:"family"`
-	Interval   Duration `yaml:"interval"`
-	Timeout    Duration `yaml:"timeout"`
-	Traceroute *bool    `yaml:"traceroute"`
+	ID         string        `yaml:"id"`
+	Name       string        `yaml:"name"`
+	Address    string        `yaml:"address"`
+	Family     string        `yaml:"family"`
+	Interval   Duration      `yaml:"interval"`
+	Timeout    Duration      `yaml:"timeout"`
+	Traceroute *bool         `yaml:"traceroute"`
+	Obsess     *ObsessConfig `yaml:"obsess"`
+}
+
+// MaxObsessStateSlots bounds the configured probe and latency history retained
+// by all enabled adaptive targets, including queued sends that can arrive in a burst.
+const MaxObsessStateSlots = 100000
+
+type ObsessConfig struct {
+	Enabled          *bool    `yaml:"enabled"`
+	Interval         Duration `yaml:"interval"`
+	LatencyThreshold string   `yaml:"latency_threshold"`
+	BaselineWindow   Duration `yaml:"baseline_window"`
+	MinSamples       int      `yaml:"min_samples"`
+	RecoverAfter     Duration `yaml:"recover_after"`
+	present          map[string]bool
+}
+
+func (o *ObsessConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return errors.New("obsess must be a mapping")
+	}
+	known := map[string]bool{"enabled": true, "interval": true, "latency_threshold": true, "baseline_window": true, "min_samples": true, "recover_after": true}
+	present := make(map[string]bool, len(node.Content)/2)
+	for i := 0; i < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if !known[key] {
+			return fmt.Errorf("field %s not found in type config.ObsessConfig", key)
+		}
+		present[key] = true
+	}
+	type plain ObsessConfig
+	if err := node.Decode((*plain)(o)); err != nil {
+		return err
+	}
+	o.present = present
+	return nil
+}
+
+// EffectiveObsess returns a default-resolved copy, or nil when this target has
+// not opted in. Explicit zero values from YAML remain invalid during validation.
+func (t TargetConfig) EffectiveObsess(c Config) *ObsessConfig {
+	if t.Obsess == nil || (t.Obsess.Enabled != nil && !*t.Obsess.Enabled) {
+		return nil
+	}
+	o := *t.Obsess
+	if o.Interval == 0 && !o.present["interval"] {
+		o.Interval = Duration(max(100*time.Millisecond, c.Ping.MinInterval.Value()))
+	}
+	if o.LatencyThreshold == "" && !o.present["latency_threshold"] {
+		o.LatencyThreshold = "50%"
+	}
+	if o.BaselineWindow == 0 && !o.present["baseline_window"] {
+		o.BaselineWindow = Duration(time.Minute)
+	}
+	if o.MinSamples == 0 && !o.present["min_samples"] {
+		o.MinSamples = 3
+	}
+	if o.RecoverAfter == 0 && !o.present["recover_after"] {
+		o.RecoverAfter = Duration(time.Minute)
+	}
+	return &o
+}
+
+// Threshold returns either an absolute RTT or an increase percentage. For
+// example, 50% triggers above 1.5 times the preceding baseline average.
+func (o ObsessConfig) Threshold() (absolute time.Duration, relativePercent float64, err error) {
+	raw := strings.TrimSpace(o.LatencyThreshold)
+	if strings.HasSuffix(raw, "%") {
+		percent, parseErr := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(raw, "%")), 64)
+		if parseErr != nil || math.IsNaN(percent) || math.IsInf(percent, 0) || percent <= 0 || math.IsInf(1+percent/100, 0) {
+			return 0, 0, errors.New("latency_threshold percentage must be finite and positive")
+		}
+		return 0, percent, nil
+	}
+	absolute, err = time.ParseDuration(raw)
+	if err != nil || absolute <= 0 {
+		return 0, 0, errors.New("latency_threshold must be a positive duration or percentage")
+	}
+	return absolute, 0, nil
 }
 
 func (t TargetConfig) EffectiveInterval(c Config) time.Duration {
@@ -254,6 +334,8 @@ func (c Config) Validate() error {
 	}
 	seen := make(map[string]struct{}, len(c.Targets))
 	rate := 0.0
+	obsessSlots := int64(0)
+	obsessEnabled := false
 	for i, t := range c.Targets {
 		prefix := fmt.Sprintf("targets[%d]", i)
 		if !stableIDRE.MatchString(t.ID) {
@@ -276,11 +358,51 @@ func (c Config) Validate() error {
 		timeout := t.EffectiveTimeout(c)
 		if interval < c.Ping.MinInterval.Value() {
 			errs = append(errs, fmt.Errorf("%s.interval must be at least %s", prefix, c.Ping.MinInterval))
-		} else {
-			rate += 1 / interval.Seconds()
 		}
 		if timeout <= 0 || timeout >= c.Storage.RawRetention.Value() {
 			errs = append(errs, fmt.Errorf("%s.timeout must be positive and shorter than raw_retention", prefix))
+		}
+		fastest := interval
+		if o := t.EffectiveObsess(c); o != nil {
+			obsessEnabled = true
+			fast := o.Interval.Value()
+			if fast < c.Ping.MinInterval.Value() || fast <= 0 {
+				errs = append(errs, fmt.Errorf("%s.obsess.interval must be at least %s", prefix, c.Ping.MinInterval))
+			}
+			if fast >= interval {
+				errs = append(errs, fmt.Errorf("%s.obsess.interval must be faster than the normal interval", prefix))
+			}
+			if fast > 0 {
+				fastest = min(fastest, fast)
+			}
+			_, percent, thresholdErr := o.Threshold()
+			if thresholdErr != nil {
+				errs = append(errs, fmt.Errorf("%s.obsess: %w", prefix, thresholdErr))
+			} else if percent > 0 && timeout > 0 && float64(timeout)*(1+percent/100) > float64(math.MaxInt64) {
+				errs = append(errs, fmt.Errorf("%s.obsess.latency_threshold exceeds the supported duration range", prefix))
+			}
+			if o.BaselineWindow <= 0 || o.RecoverAfter <= 0 || o.MinSamples <= 0 {
+				errs = append(errs, fmt.Errorf("%s.obsess baseline_window, recover_after and min_samples must be positive", prefix))
+			}
+			if percent > 0 && interval > 0 && o.BaselineWindow > 0 && int64(o.MinSamples) > int64(o.BaselineWindow.Value()/interval) {
+				errs = append(errs, fmt.Errorf("%s.obsess.min_samples cannot fit in baseline_window at the normal interval", prefix))
+			}
+			if fast > 0 && timeout > 0 && o.BaselineWindow > 0 {
+				// Four slots cover inclusive history boundaries and the two echo
+				// send loops while their socket writes are still unfinished.
+				obsessSlots += min(int64(MaxObsessStateSlots+1), durationSlots(timeout, fast)) + min(int64(MaxObsessStateSlots+1), durationSlots(o.BaselineWindow.Value(), fast)) + 4
+				obsessSlots = min(obsessSlots, int64(MaxObsessStateSlots+1))
+			}
+		}
+		if fastest > 0 {
+			rate += 1 / fastest.Seconds()
+		}
+	}
+	if obsessEnabled {
+		// Both address families can drain their accepted queues at once.
+		queueSlots := 2 * min(c.Ping.SendQueue, MaxObsessStateSlots+1)
+		if obsessSlots+int64(queueSlots) > MaxObsessStateSlots {
+			errs = append(errs, fmt.Errorf("configured obsess state exceeds %d probe/sample slots; shorten target timeouts or baseline windows, increase obsess intervals, or reduce ping.send_queue", MaxObsessStateSlots))
 		}
 	}
 	maxTimeout := c.Ping.Timeout.Value()
@@ -323,6 +445,14 @@ func (c Config) Validate() error {
 		errs = append(errs, errors.New("logging.format must be json or text"))
 	}
 	return errors.Join(errs...)
+}
+
+func durationSlots(window, interval time.Duration) int64 {
+	count := int64(window / interval)
+	if window%interval != 0 {
+		count++
+	}
+	return count
 }
 
 func validateListen(s ServerConfig) error {

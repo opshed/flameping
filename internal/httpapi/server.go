@@ -13,14 +13,23 @@ import (
 	"strings"
 	"time"
 
+	"flameping/internal/obsess"
 	"flameping/internal/store/sqlite"
 	"flameping/internal/webui"
 )
 
 type Server struct {
-	HTTP *http.Server
-	db   *sqlite.DB
+	HTTP   *http.Server
+	db     *sqlite.DB
+	obsess ObsessProvider
 }
+
+type ObsessProvider interface {
+	Snapshot(int64) (obsess.Status, bool)
+}
+
+// SetObsessProvider attaches live state before the HTTP server starts.
+func (s *Server) SetObsessProvider(provider ObsessProvider) { s.obsess = provider }
 
 func New(address string, db *sqlite.DB, logger *slog.Logger) (*Server, error) {
 	mux := http.NewServeMux()
@@ -78,7 +87,25 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) targets(w http.ResponseWriter, r *http.Request) {
 	value, err := s.db.Targets(r.Context(), time.Now())
-	respond(w, value, err)
+	if err != nil {
+		respond(w, value, err)
+		return
+	}
+	type targetStatus struct {
+		sqlite.TargetSummary
+		Obsess *obsess.Status `json:"obsess,omitempty"`
+	}
+	result := make([]targetStatus, 0, len(value))
+	for _, target := range value {
+		item := targetStatus{TargetSummary: target}
+		if s.obsess != nil {
+			if state, ok := s.obsess.Snapshot(target.ID); ok && state.Enabled {
+				item.Obsess = &state
+			}
+		}
+		result = append(result, item)
+	}
+	respond(w, result, nil)
 }
 func (s *Server) interfaces(w http.ResponseWriter, r *http.Request) {
 	value, err := s.db.Interfaces(r.Context())

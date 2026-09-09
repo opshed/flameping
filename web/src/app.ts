@@ -4,8 +4,9 @@ import "./app.css";
 import "./extra.css";
 import {RouteHistoryView, type Bounds} from "./route-history";
 import {InterfaceHistoryView} from "./interface-history";
+import {obsessLabel,renderObsessStatus,type ObsessStatus} from "./obsess-status";
 
-type Target={id:string,name:string,address:string,endpoint?:string,state:string,last_rtt_ms?:number};
+type Target={id:string,name:string,address:string,endpoint?:string,state:string,last_rtt_ms?:number,obsess?:ObsessStatus};
 type Point={time_ms:number,scheduled:number,attempted:number,sent:number,on_time?:number,late:number,unanswered:number,send_errors:number,scheduler_missed:number,rtt_count:number,avg_ms?:number,min_ms?:number,p50_ms?:number,p95_ms?:number,p99_ms?:number,max_ms?:number,distribution_ms?:number[],deadline_miss_pct:number,no_reply_pct:number,partial?:boolean,late_pct?:number,send_error_pct?:number,gap_pct?:number,partial_marker?:number};
 type RangePreset={duration:number,maxPoints:number};
 type FlameState={points:Point[]};
@@ -21,7 +22,7 @@ const ranges:Record<string,RangePreset>={"1h":{duration:3600e3,maxPoints:61},"6h
 async function api(path:string){const r=await fetch(path,{headers:{accept:"application/json"}});if(!r.ok)throw new Error(await r.text());return r.json()}
 function esc(s:string){const e=document.createElement("span");e.textContent=s;return e.innerHTML}
 function rangeButtons(){const el=$("#ranges");el.innerHTML="";for(const n of Object.keys(ranges)){const b=document.createElement("button");b.textContent=n;b.className=n===range&&!viewport?"active":"";b.onclick=()=>{range=n;viewport=null;rangeButtons();loadSeries()};el.append(b)}}
-function renderTargets(){const el=$("#targets");el.innerHTML=targets.map(t=>`<button class="target ${t.id===target?"active":""}" data-id="${esc(t.id)}"><i class="dot ${t.state}"></i><span><strong>${esc(t.name)}</strong><small>${esc(t.endpoint||t.address)}</small></span><span class="rtt">${t.last_rtt_ms==null?"—":t.last_rtt_ms.toFixed(1)+" ms"}</span></button>`).join("");el.querySelectorAll<HTMLButtonElement>("button").forEach(b=>b.onclick=()=>select(b.dataset.id!))}
+function renderTargets(){const el=$("#targets");el.innerHTML=targets.map(t=>`<button class="target ${t.id===target?"active":""}" data-id="${esc(t.id)}"><i class="dot ${t.state}"></i><span><strong>${esc(t.name)}</strong><small>${esc(t.endpoint||t.address)}</small>${t.obsess?.enabled&&t.obsess.state==="obsessing"?`<small class="obsess-badge">${esc(obsessLabel(t.obsess))}</small>`:""}</span><span class="rtt">${t.last_rtt_ms==null?"—":t.last_rtt_ms.toFixed(1)+" ms"}</span></button>`).join("");el.querySelectorAll<HTMLButtonElement>("button").forEach(b=>b.onclick=()=>select(b.dataset.id!));renderObsessStatus($("#obsess-status"),targets.find(t=>t.id===target)?.obsess)}
 function select(id:string){target=id;viewport=null;renderTargets();rangeButtons();const t=targets.find(x=>x.id===id)!;$("#title").textContent=t.name;$("#subtitle").textContent=t.endpoint||t.address;loadSeries()}
 
 const flameSeriesIndex={mean:1,p50:2,p95:3,min:4,p99:5,max:6,deadline:7,noReply:8,late:9,sendError:10,schedulerGap:11,partial:12} as const;
@@ -204,7 +205,7 @@ async function refresh(){
     const traceState=Object.entries(status.trace_capabilities??{}).filter(([,v])=>v!=="available"&&v!=="disabled").map(([k,v])=>`${k} ${v}`);
     $("#storage").textContent=`Storage ${status.pressure} · ${formatBytes(status.live_bytes)} live · ${status.dirty_buckets} dirty buckets${traceState.length?" · "+traceState.join(" · "):""}`;
     $("#health").textContent=status.ready?"ready":"paused";$("#health").className=status.ready?"pill ready":"pill";$("#health").title=status.writer_error||`${formatBytes(status.available_bytes)} filesystem space available`;
-  }catch{$("#health").textContent="unavailable";$("#health").className="pill"}
+  }catch{$("#health").textContent="unavailable";$("#health").className="pill";renderObsessStatus($("#obsess-status"),targets.find(t=>t.id===target)?.obsess,true)}
 }
 function formatBytes(n:number){for(const[u,v]of[["TiB",2**40],["GiB",2**30],["MiB",2**20]] as [string,number][]){if(n>=v)return(n/v).toFixed(1)+" "+u}return n+" B"}
 rangeButtons();refresh();setInterval(refresh,5000);addEventListener("resize",()=>{loadSeries()});

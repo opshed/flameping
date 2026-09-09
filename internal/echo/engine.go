@@ -25,6 +25,16 @@ type Target struct {
 	Timeout  time.Duration
 }
 
+// Observer receives live probe evidence independently of the lossless storage
+// queue. Implementations must return promptly and must not publish to that queue.
+type Observer interface {
+	BeginProbe(model.ProbeEvent)
+	CompleteProbe(model.ProbeKey, bool)
+	ObserveReply(model.ProbeEvent)
+	ObserveGap(model.SchedulerGap)
+	UpdateEndpoint(int64, netip.Addr)
+}
+
 type Engine struct {
 	bus          *eventbus.Bus
 	runID        model.RunID
@@ -53,7 +63,11 @@ type Engine struct {
 	inputsClosed bool
 	closing      atomic.Bool
 	failures     chan error
+	observer     Observer
 }
+
+// SetObserver must be called before Run or any concurrent use of the engine.
+func (e *Engine) SetObserver(observer Observer) { e.observer = observer }
 
 func NewEngine(bus *eventbus.Bus, runID model.RunID, v4, v6 PacketIO, sendQueue int) (*Engine, error) {
 	secret := make([]byte, 32)
@@ -76,7 +90,18 @@ func NewEngine(bus *eventbus.Bus, runID model.RunID, v4, v6 PacketIO, sendQueue 
 func (e *Engine) UpdateEndpoint(targetID int64, endpoint netip.Addr) {
 	e.mu.Lock()
 	e.current[targetID] = endpoint
+	if e.observer != nil {
+		e.observer.UpdateEndpoint(targetID, endpoint)
+	}
 	e.mu.Unlock()
+}
+
+// ObserveGap reports missing evidence immediately; RecordGap separately persists
+// the scheduler's coalesced counts.
+func (e *Engine) ObserveGap(gap model.SchedulerGap) {
+	if e.observer != nil {
+		e.observer.ObserveGap(gap)
+	}
 }
 
 func (e *Engine) TrySubmit(job scheduler.Job) bool {
@@ -205,11 +230,33 @@ func (e *Engine) sendLoop(ctx context.Context, socket PacketIO, jobs <-chan sche
 				reservation.Cancel()
 				return err
 			}
-			writeErr := socket.WriteEcho(payload, target.Endpoint, sequence)
+			// Capacity acquisition can wait through a DNS change. Resolve the
+			// queued endpoint only after it succeeds, and register the probe in
+			// the same endpoint generation before releasing the endpoint lock.
+			e.mu.RLock()
+			if endpoint, changed := e.current[target.ID]; changed {
+				if !endpoint.IsValid() || endpoint.Is4() != target.Endpoint.Is4() {
+					e.mu.RUnlock()
+					reservation.Cancel()
+					if err := e.publishUnsentGap(ctx, job); err != nil {
+						return err
+					}
+					continue
+				}
+				target.Endpoint = endpoint
+			}
 			event := model.Event{Kind: model.EventProbeSent, Probe: model.ProbeEvent{
 				Key: model.ProbeKey{RunID: e.runID, Sequence: sequence}, TargetID: target.ID,
 				Endpoint: target.Endpoint, ScheduledAt: job.ScheduledAt, SentAt: sentAt, Timeout: target.Timeout,
 			}}
+			if e.observer != nil {
+				e.observer.BeginProbe(event.Probe)
+			}
+			e.mu.RUnlock()
+			writeErr := socket.WriteEcho(payload, target.Endpoint, sequence)
+			if e.observer != nil {
+				e.observer.CompleteProbe(event.Probe.Key, writeErr == nil)
+			}
 			if writeErr != nil {
 				event.Kind = model.EventProbeSendError
 				event.Probe.SendErrorCode = "socket_write"
@@ -223,9 +270,11 @@ func (e *Engine) sendLoop(ctx context.Context, socket PacketIO, jobs <-chan sche
 }
 
 func (e *Engine) publishUnsentGap(ctx context.Context, job scheduler.Job) error {
-	return e.bus.Publish(ctx, model.Event{Kind: model.EventSchedulerGap, Gap: model.SchedulerGap{
+	gap := model.SchedulerGap{
 		TargetID: job.Target.ID, FirstScheduled: job.ScheduledAt, Interval: job.Target.Interval, MissedCount: 1,
-	}})
+	}
+	e.ObserveGap(gap)
+	return e.bus.Publish(ctx, model.Event{Kind: model.EventSchedulerGap, Gap: gap})
 }
 
 // DrainInputs closes measurement admission after the scheduler has stopped and
@@ -278,6 +327,9 @@ func (e *Engine) receiveLoop(ctx context.Context, socket PacketIO) error {
 			Key: model.ProbeKey{RunID: e.runID, Sequence: identity.Sequence}, SentAt: e.started.Add(identity.SendOffset), Timeout: identity.Timeout, ReplyAt: time.Now(), RTT: rtt,
 			ReplyClass: class, Responder: packet.Source, ICMPType: packet.Type, ICMPCode: packet.Code,
 		}}
+		if e.observer != nil {
+			e.observer.ObserveReply(event.Probe)
+		}
 		if err := e.bus.Publish(ctx, event); err != nil {
 			return fmt.Errorf("publish reply: %w", err)
 		}

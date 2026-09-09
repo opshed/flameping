@@ -24,6 +24,7 @@ import (
 	"flameping/internal/httpapi"
 	"flameping/internal/ifstats"
 	"flameping/internal/model"
+	"flameping/internal/obsess"
 	"flameping/internal/resolver"
 	"flameping/internal/scheduler"
 	"flameping/internal/store/sqlite"
@@ -99,6 +100,31 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 		schedulerTargets = append(schedulerTargets, scheduler.Target{ID: item.target.ID, StableID: item.target.StableID, Interval: item.target.Interval, Value: value})
 	}
 	sched := scheduler.New(clockpkg.New(), schedulerTargets, engine)
+	configured := make(map[string]config.TargetConfig, len(cfg.Targets))
+	for _, target := range cfg.Targets {
+		configured[target.ID] = target
+	}
+	var obsessTargets []obsess.Target
+	for _, item := range resolved {
+		if options := configured[item.target.StableID].EffectiveObsess(cfg); options != nil {
+			obsessTargets = append(obsessTargets, obsess.Target{
+				ID: item.target.ID, Endpoint: item.endpoint, Interval: item.target.Interval, Config: options,
+			})
+		}
+	}
+	var controller *obsess.Controller
+	if len(obsessTargets) > 0 {
+		controller, err = obsess.New(clockpkg.New(), obsessTargets,
+			func(id int64, interval time.Duration) { sched.UpdateInterval(id, interval) },
+			func(id int64, state obsess.Status) {
+				logger.Info("target obsess state changed", "target_id", id, "state", state.State,
+					"reason", state.Reason, "interval_ms", state.IntervalMS, "threshold_ms", state.ThresholdMS)
+			})
+		if err != nil {
+			return fmt.Errorf("configure obsess: %w", err)
+		}
+		engine.SetObserver(controller)
+	}
 
 	var collector *ifstats.Collector
 	if len(cfg.Interfaces) > 0 {
@@ -135,6 +161,9 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	api, err := httpapi.New(cfg.Server.Listen, db, logger)
 	if err != nil {
 		return err
+	}
+	if controller != nil {
+		api.SetObsessProvider(controller)
 	}
 	listener, err := net.Listen("tcp", cfg.Server.Listen)
 	if err != nil {
@@ -175,6 +204,9 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 		}
 	}
 	start("echo", engine.Run)
+	if controller != nil {
+		start("obsess", controller.Run)
+	}
 	schedulerDone := make(chan struct{})
 	producers.Add(1)
 	go func() {
