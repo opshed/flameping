@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/config"
+	"github.com/opshed/flameping/internal/config"
 )
 
 func TestSyncTargetsResolvesPingOverridesAndRestoresInheritance(t *testing.T) {

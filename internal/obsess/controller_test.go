@@ -10,8 +10,8 @@ import (
 
 	clockpkg "github.com/benbjohnson/clock"
 
-	"flameping/internal/config"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/model"
 )
 
 type fixture struct {

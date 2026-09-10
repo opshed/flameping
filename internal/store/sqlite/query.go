@@ -11,7 +11,7 @@ import (
 	"sort"
 	"time"
 
-	"flameping/internal/histogram"
+	"github.com/opshed/flameping/internal/histogram"
 )
 
 type TargetSummary struct {

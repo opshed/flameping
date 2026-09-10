@@ -10,5 +10,11 @@
     "esbuild": "0.25.9",
     "typescript": "5.9.2",
     "uplot": "1.6.32"
+  },
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opshed/flameping.git",
+    "directory": "web"
   }
 }

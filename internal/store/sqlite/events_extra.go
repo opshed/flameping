@@ -8,7 +8,7 @@ import (
 	"math"
 	"time"
 
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/model"
 )
 
 func insertEndpointChange(ctx context.Context, tx *sql.Tx, change model.EndpointChanged) error {

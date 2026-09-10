@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"flameping/internal/config"
-	"flameping/internal/store/sqlite"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/store/sqlite"
 )
 
 func testServer(t *testing.T) *Server {

@@ -14,8 +14,8 @@ import (
 
 	clockpkg "github.com/benbjohnson/clock"
 
-	"flameping/internal/config"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/model"
 )
 
 // The configuration validator budgets pending probes, retained baseline

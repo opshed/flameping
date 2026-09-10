@@ -7,7 +7,7 @@ import (
 
 	"github.com/jsimonetti/rtnetlink/v2"
 
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/model"
 )
 
 type linuxSource struct{ conn *rtnetlink.Conn }

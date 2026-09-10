@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/config"
+	"github.com/opshed/flameping/internal/config"
 )
 
 func TestPrivilegedLoopbackDestinationReached(t *testing.T) {

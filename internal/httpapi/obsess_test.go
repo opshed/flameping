@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/eventbus"
-	"flameping/internal/model"
-	"flameping/internal/obsess"
-	"flameping/internal/store/sqlite"
+	"github.com/opshed/flameping/internal/eventbus"
+	"github.com/opshed/flameping/internal/model"
+	"github.com/opshed/flameping/internal/obsess"
+	"github.com/opshed/flameping/internal/store/sqlite"
 )
 
 type liveObsessProvider struct {

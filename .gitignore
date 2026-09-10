@@ -1,4 +1,5 @@
 /flameping
+/flameping.yaml
 /*.db
 /*.db-shm
 /*.db-wal

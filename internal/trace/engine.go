@@ -9,8 +9,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"flameping/internal/eventbus"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/eventbus"
+	"github.com/opshed/flameping/internal/model"
 )
 
 type Engine struct {

@@ -10,7 +10,7 @@ import (
 
 	clockpkg "github.com/benbjohnson/clock"
 
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/model"
 )
 
 type fakeSink struct {

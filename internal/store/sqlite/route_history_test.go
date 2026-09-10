@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/model"
 )
 
 func TestRouteHistoryBoundsCountsAndDrilldown(t *testing.T) {

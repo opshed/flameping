@@ -12,8 +12,8 @@ import (
 	modernsqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
-	"flameping/internal/eventbus"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/eventbus"
+	"github.com/opshed/flameping/internal/model"
 )
 
 const (

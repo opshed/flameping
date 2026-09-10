@@ -7,7 +7,7 @@ import (
 	"errors"
 	"time"
 
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/model"
 )
 
 const (

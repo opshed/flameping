@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/config"
-	"flameping/internal/model"
-	"flameping/internal/obsess"
-	"flameping/internal/store/sqlite"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/model"
+	"github.com/opshed/flameping/internal/obsess"
+	"github.com/opshed/flameping/internal/store/sqlite"
 )
 
 func obsessLogFixture(threshold string) (sqlite.Target, *config.ObsessConfig, obsess.Transition) {

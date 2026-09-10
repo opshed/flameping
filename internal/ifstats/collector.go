@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"flameping/internal/config"
-	"flameping/internal/eventbus"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/eventbus"
+	"github.com/opshed/flameping/internal/model"
 )
 
 type Link struct {

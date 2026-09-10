@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/config"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/model"
 )
 
 func TestRouteSignatureIgnoresOrderAndMissing(t *testing.T) {

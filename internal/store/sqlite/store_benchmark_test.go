@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/config"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/model"
 )
 
 func openBenchmarkDB(b *testing.B) (*DB, Target, model.RunID) {

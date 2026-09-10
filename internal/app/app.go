@@ -17,18 +17,18 @@ import (
 
 	clockpkg "github.com/benbjohnson/clock"
 
-	"flameping/internal/buildinfo"
-	"flameping/internal/config"
-	"flameping/internal/echo"
-	"flameping/internal/eventbus"
-	"flameping/internal/httpapi"
-	"flameping/internal/ifstats"
-	"flameping/internal/model"
-	"flameping/internal/obsess"
-	"flameping/internal/resolver"
-	"flameping/internal/scheduler"
-	"flameping/internal/store/sqlite"
-	"flameping/internal/trace"
+	"github.com/opshed/flameping/internal/buildinfo"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/echo"
+	"github.com/opshed/flameping/internal/eventbus"
+	"github.com/opshed/flameping/internal/httpapi"
+	"github.com/opshed/flameping/internal/ifstats"
+	"github.com/opshed/flameping/internal/model"
+	"github.com/opshed/flameping/internal/obsess"
+	"github.com/opshed/flameping/internal/resolver"
+	"github.com/opshed/flameping/internal/scheduler"
+	"github.com/opshed/flameping/internal/store/sqlite"
+	"github.com/opshed/flameping/internal/trace"
 )
 
 func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr error) {

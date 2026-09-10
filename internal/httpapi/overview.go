@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"flameping/internal/obsess"
-	"flameping/internal/store/sqlite"
+	"github.com/opshed/flameping/internal/obsess"
+	"github.com/opshed/flameping/internal/store/sqlite"
 )
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {

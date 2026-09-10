@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/model"
 )
 
 var ErrClosed = errors.New("event bus closed")

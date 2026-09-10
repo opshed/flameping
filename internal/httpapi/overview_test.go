@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/obsess"
-	"flameping/internal/store/sqlite"
+	"github.com/opshed/flameping/internal/obsess"
+	"github.com/opshed/flameping/internal/store/sqlite"
 )
 
 func TestOverviewAPIWindowsAndLiveObsess(t *testing.T) {

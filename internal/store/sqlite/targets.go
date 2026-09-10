@@ -8,8 +8,8 @@ import (
 	"net/netip"
 	"time"
 
-	"flameping/internal/config"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/model"
 )
 
 func (d *DB) LastEndpoint(ctx context.Context, targetID int64) (netip.Addr, error) {

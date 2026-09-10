@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"flameping/internal/obsess"
-	"flameping/internal/store/sqlite"
-	"flameping/internal/webui"
+	"github.com/opshed/flameping/internal/obsess"
+	"github.com/opshed/flameping/internal/store/sqlite"
+	"github.com/opshed/flameping/internal/webui"
 )
 
 type Server struct {

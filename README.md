@@ -2,11 +2,15 @@
 
 Flameping is a small, single-process network monitor inspired by SmokePing. It sends continuous authenticated ICMP echo probes (including sub-second schedules), preserves late replies, graphs latency and deadline loss, records Linux interface counters, and periodically captures UDP traceroutes and confirmed route changes. Everything—including the responsive web UI—is embedded in one static Go executable, with SQLite as the only data store.
 
+Flameping's original code is dedicated to the public domain under [CC0 1.0 Universal](LICENSE).
+
 ## Build and run
 
 Go 1.25 or newer is required. The committed web assets mean Node is not required for a normal build.
 
 ```sh
+git clone https://github.com/opshed/flameping.git
+cd flameping
 make build
 cp configs/flameping.example.yaml flameping.yaml
 ./flameping check-config --config flameping.yaml
@@ -15,6 +19,16 @@ cp configs/flameping.example.yaml flameping.yaml
 ```
 
 Open `http://127.0.0.1:8080`. The example monitors `1.1.1.1`; edit it before deploying.
+
+You can also install the command with Go:
+
+```sh
+CGO_ENABLED=0 go install github.com/opshed/flameping/cmd/flameping@latest
+```
+
+`make build` records the source commit and build time in `flameping version`.
+Set `VERSION` for a versioned build; `COMMIT` and `BUILD_DATE` can also be supplied
+when building from a source archive or reproducing a build.
 
 On Linux, unprivileged echo requires the service user's group to fall within `net.ipv4.ping_group_range`. Traceroute reception requires `CAP_NET_RAW` (included in the sample systemd unit) or root. `doctor` reports both capabilities without changing the host.
 
@@ -87,7 +101,7 @@ flameping db compact --config PATH
 
 See [operations.md](docs/operations.md) for deployment and recovery details, [design-research.md](docs/design-research.md) for the design rationale, and [implementation-plan.md](docs/implementation-plan.md) for component invariants.
 
-This branch experiments with a **Route activity** timeline beneath the latency/loss chart. Warm marks show confirmed route changes; a separate lane shows retained trace observations. Select an interval to compare changed hops and inspect individual probes, or use **Zoom charts here** to align the charts to that interval. See the [research and experiment notes](docs/route-timeline-experiment.md) for alternatives, sources, and interpretation.
+The **Route activity** timeline sits beneath the latency/loss chart. Warm marks show confirmed route changes; a separate lane shows retained trace observations. Select an interval to compare changed hops and inspect individual probes, or use **Zoom charts here** to align the charts to that interval. See the [research and experiment notes](docs/route-timeline-experiment.md) for alternatives, sources, and interpretation.
 
 **Interface activity** surfaces host counter signals above and alongside the graphs. Aligned lanes show errors, drops/missed packets, and resets; interface details open automatically, including when only one interface is configured. Select an interval for counter specifics and reset reasons, with peak RX/TX traffic on its own scale. See the [interface experiment notes](docs/interface-timeline-experiment.md) for the design and measurement semantics.
 
@@ -106,3 +120,15 @@ make browser-smoke  # requires Node/npm and headless Chrome
 ```
 
 The HTTP API is under `/api/v1`; `/healthz` is process liveness and `/readyz` reflects storage-writer readiness. The server listens on loopback by default and refuses a public listener unless `server.allow_public` is explicitly enabled. Flameping has no built-in authentication; put an authenticated reverse proxy in front of any public deployment.
+
+## License
+
+Flameping's original source code, documentation, and assets are dedicated to the
+public domain under [CC0 1.0 Universal](LICENSE), identified as `CC0-1.0` in SPDX.
+See the [Creative Commons CC0 summary](https://creativecommons.org/publicdomain/zero/1.0/)
+for a description of the dedication.
+
+Dependencies retain their own licenses. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+contains the notices for the Go runtime, linked Go dependencies, and the uPlot
+code bundled in the web UI. Include those notices when redistributing a built
+executable or the bundled web assets.

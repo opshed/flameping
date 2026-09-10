@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/model"
 )
 
 func TestObsessRawHistoryPreservesFastProbesOnNormalIntervalTarget(t *testing.T) {

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/eventbus"
-	"flameping/internal/model"
-	"flameping/internal/scheduler"
+	"github.com/opshed/flameping/internal/eventbus"
+	"github.com/opshed/flameping/internal/model"
+	"github.com/opshed/flameping/internal/scheduler"
 )
 
 type observerSpy struct {

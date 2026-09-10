@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"flameping/internal/config"
-	"flameping/internal/eventbus"
-	"flameping/internal/histogram"
-	"flameping/internal/model"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/eventbus"
+	"github.com/opshed/flameping/internal/histogram"
+	"github.com/opshed/flameping/internal/model"
 )
 
 func openTestDB(t *testing.T) (*DB, config.Config, Target, model.RunID) {

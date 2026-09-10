@@ -1,4 +1,4 @@
-module flameping
+module github.com/opshed/flameping
 
 go 1.25.0
 

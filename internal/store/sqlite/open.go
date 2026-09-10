@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"flameping/internal/config"
+	"github.com/opshed/flameping/internal/config"
 
 	_ "modernc.org/sqlite"
 )

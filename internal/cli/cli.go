@@ -12,13 +12,13 @@ import (
 	"runtime"
 	"syscall"
 
-	"flameping/internal/app"
-	"flameping/internal/buildinfo"
-	"flameping/internal/config"
-	"flameping/internal/echo"
-	"flameping/internal/ifstats"
-	"flameping/internal/store/sqlite"
-	"flameping/internal/trace"
+	"github.com/opshed/flameping/internal/app"
+	"github.com/opshed/flameping/internal/buildinfo"
+	"github.com/opshed/flameping/internal/config"
+	"github.com/opshed/flameping/internal/echo"
+	"github.com/opshed/flameping/internal/ifstats"
+	"github.com/opshed/flameping/internal/store/sqlite"
+	"github.com/opshed/flameping/internal/trace"
 )
 
 func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
