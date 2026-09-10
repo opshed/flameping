@@ -40,6 +40,7 @@ func New(address string, db *sqlite.DB, logger *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("GET /api/v1/targets", s.targets)
+	mux.HandleFunc("GET /api/v1/overview", s.overview)
 	mux.HandleFunc("GET /api/v1/targets/{target}/ping", s.ping)
 	mux.HandleFunc("GET /api/v1/interfaces", s.interfaces)
 	mux.HandleFunc("GET /api/v1/interfaces/{name}/series", s.interfaceSeries)

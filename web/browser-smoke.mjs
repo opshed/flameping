@@ -17,6 +17,22 @@ let routeMode = "normal", nextHistoryAction = "", nextTraceAction = "", nextPing
 let delayedHistory = 0, delayedTrace = 0;
 const pendingDelays = new Set();
 let lastHistory;
+let nextOverviewAction="",nextTargetsAction="", overviewMode="normal";
+
+function overviewFixture(window="15m") {
+  const duration={"5m":300000,"15m":900000,"1h":3600000}[window]??900000,to=Date.now(),from=to-duration;
+  const recent=(fields={})=>({scheduled:180,attempted:180,sent:180,settled:180,pending:0,on_time:180,late:0,unanswered:0,send_errors:0,scheduler_missed:0,rtt_count:180,p50_ms:2.4,p95_ms:4.8,deadline_miss_pct:0,no_reply_pct:0,partial:false,...fields});
+  const extras=[
+    {id:"quiet",name:"Quiet link",address:"203.0.113.20",state:"pending"},
+    {id:'unseen"&/#?',name:'Unseen <link> "test"',address:"unresolved.example.test",state:"unknown"},
+    {id:"stale",name:"Old observation",address:"203.0.113.22",state:"stale"},
+  ];
+  const targets=[...fixtures.targets,...extras].map((target,i)=>{
+    const r=i===0?recent({on_time:169,late:3,unanswered:8,rtt_count:172,deadline_miss_pct:100*11/180,no_reply_pct:100*8/180}):i===1?recent({scheduled:192,attempted:182,send_errors:2,scheduler_missed:10,p50_ms:18.7,p95_ms:43}):i===2?recent({scheduled:1,attempted:1,sent:1,settled:0,pending:1,on_time:0,rtt_count:0,p50_ms:undefined,p95_ms:undefined,partial:true}):recent({scheduled:0,attempted:0,sent:0,settled:0,on_time:0,rtt_count:0,p50_ms:undefined,p95_ms:undefined,deadline_miss_pct:null,no_reply_pct:null});
+    return {...target,state:i===1?"send_error":target.state,last_rtt_ms:i===1?undefined:target.last_rtt_ms,interval_ms:5000,timeout_ms:1000,last_scheduled_at_ms:i===3?undefined:i===4?to-3600000:to-3000,recent:r,trend:Array.from({length:15},(_,index)=>({from_ms:from+duration*index/15,to_ms:from+duration*(index+1)/15,...r,p50_ms:index===6?undefined:r.p50_ms==null?undefined:r.p50_ms*(1+index/30),p95_ms:index===6?undefined:r.p95_ms,unanswered:i===0&&index===7?8:0,late:i===0&&index===8?3:0})),route:{traces:i<2?5:0,reached:i<2?5:0,unreached:0,errors:0,changes:i===0?2:0}};
+  });
+  return {as_of_ms:to,from_ms:from,to_ms:to,window_ms:duration,targets:overviewMode==="empty"?[]:targets,interfaces:overviewMode==="empty"?[]:fixtures.interfaces.map((info,i)=>({...info,last_at_ms:to-5000,has_deltas:i===0,peak_rx_mbps:38.6,peak_tx_mbps:4.2,rx_errors:0,tx_errors:0,rx_dropped:0,tx_dropped:0,rx_missed:0,rx_fifo:0,tx_fifo:0,rx_crc:i===0?3:0,rx_frame:0,tx_carrier:0,collisions:0,resets:i===1?1:0,has_errors:i===0,has_drops:false,partial:false}))};
+}
 
 const fixtures = {
   targets: [
@@ -94,6 +110,7 @@ function routeFixture(target, from, to, maxPoints) {
 
 function fixtureResponse(url) {
   const path = url.pathname;
+  if(path==="/api/v1/overview")return overviewFixture(url.searchParams.get("window")??"15m");
   if (path === "/api/v1/targets") return fixtures.targets;
   if (path === "/api/v1/interfaces") return (interfaceMode === "empty" ? [] : interfaceMode === "normal" ? fixtures.interfaces : fixtures.interfaces.slice(0,1)).map(info=>({...info,ifindex:2,last_at_ms:Date.now()-5000}));
   if (/^\/api\/v1\/targets\/[^/]+\/ping$/.test(path)) {
@@ -151,6 +168,48 @@ const automation = `<script>
   addEventListener("load", async () => {
     try {
     document.body.dataset.smoke = "loaded";
+    const overview=document.querySelector("#overview");
+    await until(()=>overview.dataset.loaded==="true", "overview landing page");
+    assert(!overview.hidden&&document.querySelector("#detail-content").hidden&&!document.querySelector("#flame .uplot"),"overview did not become the default page");
+    assert(document.querySelectorAll("[data-target-row]").length===5,"overview omitted targets");
+    assert(document.querySelector('[data-overview-count="deadline"] strong').textContent==="1"&&document.querySelector('[data-overview-count="missing"] strong').textContent==="2","overview confused target counts or pending with missing data");
+    assert(document.querySelector('[data-target-row="quiet"]').textContent.includes("1 pending")&&document.querySelector('[data-target-row="quiet"]').textContent.includes("provisional"),"pending evidence is not explicit");
+    assert(overview.textContent.includes("3 RX CRC"),"diagnostic-only interface errors were hidden");
+    assert(!overview.querySelector("link")&&!overview.querySelector("[onerror]"),"configured labels were interpreted as markup");
+    document.querySelector('[data-overview-count="deadline"]').click();
+    assert(document.querySelectorAll("[data-target-row]").length===1,"summary did not filter target evidence");
+    document.querySelector('[data-overview-count="all"]').click();
+    const search=document.querySelector("#overview-search");search.value="unresolved";search.dispatchEvent(new Event("input"));
+    assert(document.querySelectorAll("[data-target-row]").length===1&&document.querySelector("[data-target-row]").textContent.includes("No observation"),"search or no-observation state failed");
+    search.value="";search.dispatchEvent(new Event("input"));
+    const changeWindow=value=>{const select=document.querySelector("#overview-window");select.value=value;select.dispatchEvent(new Event("change"));};
+    changeWindow("1h");await until(()=>overview.dataset.loaded==="true"&&!overview.hasAttribute("aria-busy"),"overview window change");
+    const routeFocus=document.querySelector('[data-overview-focus="route:gateway"]');routeFocus.focus();
+    const beforeRefresh=overview.dataset.asOf;
+    await until(()=>overview.dataset.asOf!==beforeRefresh,"overview automatic refresh");
+    assert(document.activeElement.dataset.overviewFocus==="route:gateway","overview refresh stole link focus");
+    await control({overview:"failure"});
+    await until(()=>overview.dataset.failed==="true","overview refresh failure");
+    assert(overview.textContent.includes("previous observations")&&document.querySelectorAll("[data-target-row]").length===5,"refresh failure hid old evidence or masqueraded as live");
+    await until(()=>overview.dataset.failed==="false","overview refresh recovery");
+    await control({overview:"delay"});changeWindow("5m");await wait(40);changeWindow("15m");
+    await until(()=>overview.dataset.loaded==="true"&&!overview.hasAttribute("aria-busy"),"overview latest window");await wait(350);
+    const targetLink=document.querySelector('[data-overview-target="gateway"]'),bounds=new URLSearchParams(targetLink.hash.slice(1));
+    assert(Number(bounds.get("to"))-Number(bounds.get("from"))===900000,"delayed overview response replaced the selected window");
+    targetLink.click();await until(()=>overview.hidden&&document.querySelector("#flame .u-over"),"overview target drilldown");
+    await until(()=>Math.abs(Number(document.querySelector("#flame").dataset.from)-Number(bounds.get("from")))<=1,"overview exact-window drilldown");
+    assert(document.querySelector("#detail-window-note").textContent.includes("Fixed time window"),"fixed-window detail is unlabeled");
+    history.back();await until(()=>!overview.hidden,"back to overview");
+    assert(document.querySelector("#overview-window").value==="15m","back navigation lost overview selection");
+    document.querySelector('[data-overview-target="gateway"]').click();
+    await until(()=>document.querySelector("#title").textContent==="Gateway"&&document.querySelector("#flame").dataset.flameRendered==="distribution","return to gateway detail");
+    await control({targets:"failure",ping:"delay"});
+    document.querySelector('#targets button[data-id="backup"]').click();
+    assert(document.querySelector("#title").textContent==="Backup"&&document.querySelector("#flame").dataset.flameRendered==="empty","navigation retained old target evidence while metadata failed");
+    await until(()=>document.querySelector("#flame").dataset.flameRendered==="distribution","detail loads independently of failed metadata");
+    document.querySelector('#targets button[data-id="gateway"]').click();
+    await until(()=>document.querySelector("#title").textContent==="Gateway"&&document.querySelector("#flame").dataset.flameRendered==="distribution","gateway detail recovery");
+    document.body.dataset.overviewChecks="true";
     await until(() => [...document.querySelectorAll("#ranges button")].find(button => button.textContent === "24h"));
     const combined = await until(() => document.querySelector("#targets button[data-id=gateway]") && document.querySelector("#flame .u-over") && document.querySelector("#flame"));
     const obsessStatus = document.querySelector("#obsess-status");
@@ -396,6 +455,13 @@ const screenshotAutomation = `<script>
   const until = async test => { for (let i=0; i<50; i++) { const value=test(); if (value) return value; await wait(100); } throw new Error("screenshot fixture timed out"); };
   addEventListener("load", async () => {
     try {
+    await until(()=>document.querySelector('#overview[data-loaded="true"]'));
+    if(new URL(location.href).searchParams.get("screenshot")==="overview"){
+      if(document.documentElement.scrollWidth>innerWidth)throw new Error("overview overflows viewport");
+      if(innerWidth<700&&document.querySelector(".overview-table tr").getBoundingClientRect().width>innerWidth)throw new Error("overview mobile rows overflow");
+      await wait(200);document.body.dataset.screenshotReady="true";return;
+    }
+    document.querySelector('[data-overview-target="gateway"]').click();
     await until(() => document.querySelector("#flame[data-flame-rendered=distribution]") && document.querySelector("#targets button[data-id=backup]"));
     if (new URL(location.href).searchParams.get("screenshot") === "obsess") {
       document.querySelector("#targets button[data-id=gateway]").click();
@@ -437,6 +503,8 @@ const server = createServer(async (request, response) => {
     response.end((path.includes("screenshot")?screenshotAutomation:automation).replace(/^<script>/,"").replace(/<\/script>$/, ""));return;
   }
   if (path === "/__smoke/control") {
+    if(url.searchParams.has("overview"))nextOverviewAction=url.searchParams.get("overview");
+    if(url.searchParams.has("targets"))nextTargetsAction=url.searchParams.get("targets");
     if (url.searchParams.has("mode")) { routeMode = url.searchParams.get("mode"); routeWindows.clear(); }
     if (url.searchParams.has("history")) nextHistoryAction = url.searchParams.get("history");
     if (url.searchParams.has("trace")) nextTraceAction = url.searchParams.get("trace");
@@ -484,7 +552,11 @@ const server = createServer(async (request, response) => {
       const isHistory = path.endsWith("/route-history"), isTrace = /^\/api\/v1\/traces\/\d+$/.test(path), isPing = path.endsWith("/ping");
       if (isHistory) lastHistory = fixture;
       const isInterface=path==="/api/v1/interfaces/eth0/series",isInterfaces=path==="/api/v1/interfaces";
-      const action = isInterface?nextInterfaceAction:isInterfaces?nextInterfacesAction:isHistory ? nextHistoryAction : isTrace ? nextTraceAction : isPing ? nextPingAction : "";
+      const isOverview=path==="/api/v1/overview";
+      const isTargets=path==="/api/v1/targets";
+      const action = isTargets?nextTargetsAction:isOverview?nextOverviewAction:isInterface?nextInterfaceAction:isInterfaces?nextInterfacesAction:isHistory ? nextHistoryAction : isTrace ? nextTraceAction : isPing ? nextPingAction : "";
+      if(isTargets)nextTargetsAction="";
+      if(isOverview)nextOverviewAction="";
       if(isInterface)nextInterfaceAction="";if(isInterfaces)nextInterfacesAction="";
       if (isHistory) nextHistoryAction = "";
       if (isTrace) nextTraceAction = "";
@@ -501,6 +573,8 @@ const server = createServer(async (request, response) => {
       response.end(json(fixture));
       return;
     }
+  } else if(path==="/api/v1/overview"){
+    response.writeHead(200,{"content-type":"application/json"});response.end(json({as_of_ms:Date.now(),from_ms:Date.now()-900000,to_ms:Date.now(),window_ms:900000,targets:[],interfaces:[]}));return;
   } else if (path === "/api/v1/targets" || path === "/api/v1/interfaces") {
     response.writeHead(200, {"content-type":"application/json"});
     response.end(json([]));
@@ -572,7 +646,7 @@ async function captureScreenshot(path, width, height, mode="overview") {
 
 try {
   let output = await render();
-  if (!output.includes('id="health" class="pill ready"') || !output.includes("No interfaces configured")) {
+  if (!output.includes('id="health" class="pill ready"') || !output.includes("No interfaces configured") || !output.includes("No targets configured")) {
     throw new Error("dashboard did not reach its ready empty state");
   }
 
@@ -589,6 +663,7 @@ try {
   if (!output.includes('data-legend-preserved="true"')) throw new Error("chart interaction state was not preserved");
   if (!output.includes('data-interface-checks="true"')) throw new Error("interface anomaly workflow did not complete");
   if (!output.includes('data-obsess-checks="true"')) throw new Error("live obsess state workflow did not complete");
+  if (!output.includes('data-overview-checks="true"')) throw new Error("overview workflow did not complete");
   if (!output.includes('data-route-checks="true"')) throw new Error("route history workflow did not complete");
   if (!output.includes('id="interface-title" tabindex="-1">eth0</h4>')) throw new Error("interface request failure did not recover or a stale failure replaced current data");
   for (const text of [">Backup</h2>", ">eth0</h4>", "missing", "203.0.113.9", "192.0.2.3", "198.51.100.2"]) {
@@ -619,6 +694,8 @@ try {
     await captureScreenshot(process.env.FLAMEPING_SCREENSHOT, 1440, 1100);
     console.log(`browser smoke: wrote desktop screenshot to ${process.env.FLAMEPING_SCREENSHOT}`);
   }
+  if(process.env.FLAMEPING_SCREENSHOT_OVERVIEW)await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_OVERVIEW,1440,1500,"overview");
+  if(process.env.FLAMEPING_SCREENSHOT_OVERVIEW_MOBILE)await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_OVERVIEW_MOBILE,390,844,"overview");
   if (process.env.FLAMEPING_SCREENSHOT_OBSESS) {
     await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_OBSESS,1440,1100,"obsess");
   }
@@ -643,7 +720,7 @@ try {
     await captureScreenshot(process.env.FLAMEPING_SCREENSHOT_INTERFACE_MOBILE,390,844,"interfaces");
     console.log(`browser smoke: wrote mobile interface screenshot to ${process.env.FLAMEPING_SCREENSHOT_INTERFACE_MOBILE}`);
   }
-  console.log("browser smoke: interface signals, automatic details, diagnostic-only errors, reset/unknown distinctions, zoom, failures, snapshots, CSP geometry; flame density/loss rail, local gaps, preset/zoom bounds, legend persistence, interface failure recovery; aligned route counts, dense/empty intervals, keyboard navigation, before/after semantics, raw probes, truncation, error retries, stale-response isolation, route zoom, and inspector refresh persistence passed");
+  console.log("browser smoke: overview landing, counts/search/filter, pending/no-data, exact-window/back navigation, keyboard focus, refresh failures/recovery, stale-response isolation and mobile geometry; interface signals, automatic details, diagnostic-only errors, reset/unknown distinctions, zoom, failures, snapshots, CSP geometry; flame density/loss rail, local gaps, preset/zoom bounds, legend persistence, interface failure recovery; aligned route counts, dense/empty intervals, keyboard navigation, before/after semantics, raw probes, truncation, error retries, stale-response isolation, route zoom, and inspector refresh persistence passed");
 } finally {
   server.close();
 }

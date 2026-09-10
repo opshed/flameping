@@ -73,7 +73,15 @@ type queryAggregate struct {
 }
 
 func (d *DB) Targets(ctx context.Context, asOf time.Time) ([]TargetSummary, error) {
-	rows, err := d.readers.QueryContext(ctx, `
+	return queryTargets(ctx, d.readers, asOf)
+}
+
+type rowQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func queryTargets(ctx context.Context, q rowQueryer, asOf time.Time) ([]TargetSummary, error) {
+	rows, err := q.QueryContext(ctx, `
 	SELECT t.id, t.stable_id, t.display_name, t.configured_address, t.interval_ns, t.timeout_ns,
 		l.scheduled_at_us, l.sent_at_us, l.timeout_ns, l.reply_at_us, l.rtt_ns, l.local_outcome, e.address,
 		g.first_scheduled_at_us+((g.missed_count-1)*(g.interval_ns/1000))
@@ -107,6 +115,9 @@ func (d *DB) Targets(ctx context.Context, asOf time.Time) ([]TargetSummary, erro
 			ms := gapLast.Int64 / 1000
 			item.LastScheduledAtMS = &ms
 			item.State = "scheduler_gap"
+			if asOf.UnixMicro()-gapLast.Int64 > max(3*intervalNS, timeoutNS+intervalNS)/1000 {
+				item.State = "stale"
+			}
 		} else if !scheduled.Valid {
 			item.State = "unknown"
 		} else {
@@ -735,7 +746,11 @@ type InterfaceSeries struct {
 type interfaceQueryRow struct{ generation, at, rx, tx, rxErr, txErr, rxDrop, txDrop, rxMiss, rxFIFO, txFIFO, rxCRC, rxFrame, txCarrier, collisions int64 }
 
 func (d *DB) Interfaces(ctx context.Context) ([]InterfaceSummary, error) {
-	rows, err := d.readers.QueryContext(ctx, `SELECT ci.name,ci.display_name,COALESCE(g.ifindex,0),COALESCE(g.mac,''),COALESCE(s.sampled_at_us,0),
+	return queryInterfaces(ctx, d.readers)
+}
+
+func queryInterfaces(ctx context.Context, q rowQueryer) ([]InterfaceSummary, error) {
+	rows, err := q.QueryContext(ctx, `SELECT ci.name,ci.display_name,COALESCE(g.ifindex,0),COALESCE(g.mac,''),COALESCE(s.sampled_at_us,0),
 		CASE WHEN g.id IS NOT NULL AND g.ended_at_us IS NULL AND s.sampled_at_us IS NOT NULL THEN 1 ELSE 0 END
 		FROM configured_interfaces ci
 		LEFT JOIN interface_generations g ON g.id=(SELECT ig.id FROM interface_generations ig

@@ -18,6 +18,21 @@ Open `http://127.0.0.1:8080`. The example monitors `1.1.1.1`; edit it before dep
 
 On Linux, unprivileged echo requires the service user's group to fall within `net.ipv4.ping_group_range`. Traceroute reception requires `CAP_NET_RAW` (included in the sample systemd unit) or root. `doctor` reports both capabilities without changing the host.
 
+## Overview
+
+The landing page compares recent observations across all configured targets.
+Choose a 5-minute, 15-minute, or one-hour window; filter by deadline misses,
+active obsess probing, local collection issues, or stale/missing observations.
+Each row shows the latest outcome separately from window latency percentiles,
+loss counts, a small trend, and retained route activity. Host interface counters
+and monitor readiness appear separately.
+
+Select a target to open the detailed charts for that exact time window. Chart
+presets return to a live rolling range, and **Overview** returns to the target
+comparison. Missing measurements stay explicit; local send errors and skipped
+schedules are not counted as network loss. See the [overview experiment notes](docs/overview-experiment.md)
+for the researched alternatives and measurement semantics.
+
 ## Per-target ping settings
 
 The top-level `ping` block supplies defaults. Override individual timing settings

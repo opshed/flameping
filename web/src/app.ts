@@ -5,6 +5,7 @@ import "./extra.css";
 import {RouteHistoryView, type Bounds} from "./route-history";
 import {InterfaceHistoryView} from "./interface-history";
 import {obsessLabel,renderObsessStatus,type ObsessStatus} from "./obsess-status";
+import {OverviewView,detailLink,type MonitorStatus} from "./overview";
 
 type Target={id:string,name:string,address:string,endpoint?:string,state:string,last_rtt_ms?:number,obsess?:ObsessStatus};
 type Point={time_ms:number,scheduled:number,attempted:number,sent:number,on_time?:number,late:number,unanswered:number,send_errors:number,scheduler_missed:number,rtt_count:number,avg_ms?:number,min_ms?:number,p50_ms?:number,p95_ms?:number,p99_ms?:number,max_ms?:number,distribution_ms?:number[],deadline_miss_pct:number,no_reply_pct:number,partial?:boolean,late_pct?:number,send_error_pct?:number,gap_pct?:number,partial_marker?:number};
@@ -13,17 +14,38 @@ type FlameState={points:Point[]};
 const $=(s:string)=>document.querySelector(s) as HTMLElement;
 let target:string|null=null,range="6h",targets:Target[]=[];
 let flame:uPlot|null=null;
+let page:"overview"|"details"="overview",refreshRequest=0;
+let monitorStatus:MonitorStatus|null=null;
 const flameState:FlameState={points:[]};
 let viewport:{from:number,to:number}|null=null,seriesRequest=0;
 let routeSelection:Bounds|null=null,interfaceSelection:Bounds|null=null,flameContext:string|null=null;
 const routeView=new RouteHistoryView($("#route-history"),bounds=>drillDown(bounds.from,bounds.to),bounds=>{routeSelection=bounds;flame?.redraw()});
 const interfaceView=new InterfaceHistoryView($("#interface-history"),$("#interface-alert"),$("#interface-details"),bounds=>drillDown(bounds.from,bounds.to),bounds=>{interfaceSelection=bounds;flame?.redraw()});
+const overviewView=new OverviewView($("#overview"),items=>{targets=items;renderTargets()});
 const ranges:Record<string,RangePreset>={"1h":{duration:3600e3,maxPoints:61},"6h":{duration:6*3600e3,maxPoints:73},"24h":{duration:86400e3,maxPoints:97},"7d":{duration:7*86400e3,maxPoints:169},"30d":{duration:30*86400e3,maxPoints:181}};
 async function api(path:string){const r=await fetch(path,{headers:{accept:"application/json"}});if(!r.ok)throw new Error(await r.text());return r.json()}
-function esc(s:string){const e=document.createElement("span");e.textContent=s;return e.innerHTML}
-function rangeButtons(){const el=$("#ranges");el.innerHTML="";for(const n of Object.keys(ranges)){const b=document.createElement("button");b.textContent=n;b.className=n===range&&!viewport?"active":"";b.onclick=()=>{range=n;viewport=null;rangeButtons();loadSeries()};el.append(b)}}
+function esc(s:string){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]!))}
+function rangeButtons(){const el=$("#ranges");el.innerHTML="";for(const n of Object.keys(ranges)){const b=document.createElement("button");b.textContent=n;b.className=n===range&&!viewport?"active":"";b.onclick=()=>{range=n;viewport=null;history.replaceState(null,"",target?`#target=${encodeURIComponent(target)}`:"#details");rangeButtons();loadSeries()};el.append(b)}}
 function renderTargets(){const el=$("#targets");el.innerHTML=targets.map(t=>`<button class="target ${t.id===target?"active":""}" data-id="${esc(t.id)}"><i class="dot ${t.state}"></i><span><strong>${esc(t.name)}</strong><small>${esc(t.endpoint||t.address)}</small>${t.obsess?.enabled&&t.obsess.state==="obsessing"?`<small class="obsess-badge">${esc(obsessLabel(t.obsess))}</small>`:""}</span><span class="rtt">${t.last_rtt_ms==null?"—":t.last_rtt_ms.toFixed(1)+" ms"}</span></button>`).join("");el.querySelectorAll<HTMLButtonElement>("button").forEach(b=>b.onclick=()=>select(b.dataset.id!));renderObsessStatus($("#obsess-status"),targets.find(t=>t.id===target)?.obsess)}
-function select(id:string){target=id;viewport=null;renderTargets();rangeButtons();const t=targets.find(x=>x.id===id)!;$("#title").textContent=t.name;$("#subtitle").textContent=t.endpoint||t.address;loadSeries()}
+function select(id:string){const hash=`#target=${encodeURIComponent(id)}`;if(location.hash!==hash)history.pushState(null,"",hash);navigate()}
+function detailHeading(){const t=targets.find(x=>x.id===target);$("#title").textContent=t?.name??(target?"Target unavailable":"Host diagnostics");$("#subtitle").textContent=t?(t.endpoint||t.address):target?"This target is not in the current configuration.":"Interface observations from this monitor.";renderObsessStatus($("#obsess-status"),t?.obsess)}
+function snapshotNote(){const note=$("#detail-window-note");note.hidden=!viewport;if(viewport)note.innerHTML=`Fixed time window: ${esc(new Date(viewport.from).toLocaleString())} – ${esc(new Date(viewport.to).toLocaleString())} · <a href="${target?`#target=${encodeURIComponent(target)}`:"#details"}">Return to live range</a>`}
+function navigate(){
+  const params=new URLSearchParams(location.hash.slice(1)),isDetail=params.has("target")||params.get("view")==="details"||location.hash==="#details";
+  page=isDetail?"details":"overview";++seriesRequest;++refreshRequest;
+  if(isDetail){if(params.has("target"))target=params.get("target");const from=Number(params.get("from")),to=Number(params.get("to"));viewport=params.has("from")&&params.has("to")&&Number.isFinite(from)&&Number.isFinite(to)&&from>=0&&to>from?{from,to}:null;}
+  $("main").classList.toggle("overview-page",!isDetail);$("#overview").hidden=isDetail;$("#detail-content").hidden=!isDetail;
+  for(const [id,current]of [["#nav-overview",!isDetail],["#nav-details",isDetail]] as const){if(current)$(id).setAttribute("aria-current","page");else $(id).removeAttribute("aria-current")}
+  overviewView.setVisible(!isDetail);if(isDetail&&!target&&targets.length)target=targets[0].id;renderTargets();detailHeading();rangeButtons();snapshotNote();
+  if(isDetail){
+    const focus=params.get("focus"),destination=focus==="route-history"||focus==="interface-history"?$("#"+focus):$("#title");
+    destination.tabIndex=-1;destination.focus({preventScroll:true});
+    if(!focus)scrollTo({top:0});
+    const navigationHash=location.hash;
+    void loadSeries().finally(()=>{if(page==="details"&&location.hash===navigationHash&&document.activeElement===destination&&focus)destination.scrollIntoView({block:"start"})});
+  }
+  void refresh(false);
+}
 
 const flameSeriesIndex={mean:1,p50:2,p95:3,min:4,p99:5,max:6,deadline:7,noReply:8,late:9,sendError:10,schedulerGap:11,partial:12} as const;
 const noPath=()=>null;
@@ -167,11 +189,13 @@ function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:nu
 }
 
 function seriesBounds(){if(viewport)return viewport;const to=Date.now();return{to,from:to-ranges[range].duration}}
-function drillDown(from:number,to:number){viewport={from,to};rangeButtons();loadSeries()}
+function drillDown(from:number,to:number){viewport={from,to};history.replaceState(null,"",detailLink(target??undefined,{from_ms:Math.round(from),to_ms:Math.round(to)}));rangeButtons();loadSeries()}
 async function loadSeries(){
+  if(page!=="details")return;
+  snapshotNote();
   const requested=seriesBounds(),bounds={from:Math.round(requested.from),to:Math.round(requested.to)},windowKey=viewport?`${viewport.from}:${viewport.to}`:range;
-  interfaceView.load(bounds,windowKey,viewport?900:ranges[range].maxPoints);
-  if(!target)return;
+  const interfacesLoading=interfaceView.load(bounds,windowKey,viewport?900:ranges[range].maxPoints);
+  if(!target){await interfacesLoading;return;}
   const context=`${target}:${windowKey}`,changed=context!==flameContext;
   const id=++seriesRequest,selected=target,maxPoints=viewport?900:ranges[range].maxPoints;
   if(changed){
@@ -180,7 +204,7 @@ async function loadSeries(){
     $("#stats").innerHTML=stat("Latest mean","—")+stat("Deadline miss","—")+stat("No reply","—")+stat("Packets sent","—");
     $("#flame-status").hidden=false;$("#flame-status").textContent="Loading latency observations…";
   }
-  routeView.load(target,bounds,windowKey);
+  const routesLoading=routeView.load(target,bounds,windowKey);
   try{
     const s=await api(`/api/v1/targets/${encodeURIComponent(selected)}/ping?from=${Math.round(bounds.from)}&to=${Math.round(bounds.to)}&max_points=${maxPoints}`);
     if(id!==seriesRequest||selected!==target)return;
@@ -194,18 +218,29 @@ async function loadSeries(){
     if(id!==seriesRequest||selected!==target)return;
     $("#flame-status").hidden=false;
     $("#flame-status").textContent=flameState.points.length?"Latency refresh failed · previous observations shown. Retrying…":"Could not load latency observations for this window. Retrying…";
-  }
+  }finally{await Promise.allSettled([interfacesLoading,routesLoading])}
 }
 function stat(k:string,v:string){return`<div class="stat"><label>${k}</label><strong>${v}</strong></div>`}
-async function refresh(){
-  try{
-    targets=(await api("/api/v1/targets"))??[];renderTargets();
-    if(!target&&targets.length)select(targets[0].id);else loadSeries();
-    const status=await api("/api/v1/status");interfaceView.setCapability(status.interface_capability??"");
-    const traceState=Object.entries(status.trace_capabilities??{}).filter(([,v])=>v!=="available"&&v!=="disabled").map(([k,v])=>`${k} ${v}`);
-    $("#storage").textContent=`Storage ${status.pressure} · ${formatBytes(status.live_bytes)} live · ${status.dirty_buckets} dirty buckets${traceState.length?" · "+traceState.join(" · "):""}`;
-    $("#health").textContent=status.ready?"ready":"paused";$("#health").className=status.ready?"pill ready":"pill";$("#health").title=status.writer_error||`${formatBytes(status.available_bytes)} filesystem space available`;
-  }catch{$("#health").textContent="unavailable";$("#health").className="pill";renderObsessStatus($("#obsess-status"),targets.find(t=>t.id===target)?.obsess,true)}
+async function refresh(loadDetails=true){
+  const request=++refreshRequest,current=page;
+  const observations=async()=>{
+    if(current==="overview"){await overviewView.load();return}
+    try{
+      const value=await api("/api/v1/targets");if(request!==refreshRequest||page!==current)return;
+      targets=value??[];const previous=target;if(!target&&targets.length)target=targets[0].id;
+      renderTargets();detailHeading();if(loadDetails||target!==previous)loadSeries();
+    }catch{if(request===refreshRequest)renderObsessStatus($("#obsess-status"),targets.find(t=>t.id===target)?.obsess,true)}
+  };
+  const monitor=async()=>{
+    try{
+      const status:MonitorStatus=await api("/api/v1/status");if(request!==refreshRequest)return;
+      monitorStatus=status;overviewView.setMonitor(status);interfaceView.setCapability(status.interface_capability??"");
+      const traceState=Object.entries(status.trace_capabilities??{}).filter(([,v])=>v!=="available"&&v!=="disabled").map(([k,v])=>`${k} ${v}`);
+      $("#storage").textContent=`Storage ${status.pressure} · ${formatBytes(status.live_bytes)} live · ${status.dirty_buckets} dirty buckets${traceState.length?" · "+traceState.join(" · "):""}`;
+      $("#health").textContent=status.ready?"ready":"paused";$("#health").className=status.ready?"pill ready":"pill";$("#health").title=status.writer_error||`${formatBytes(status.available_bytes)} filesystem space available`;
+    }catch{if(request!==refreshRequest)return;$("#health").textContent="unavailable";$("#health").className="pill";overviewView.setMonitor(monitorStatus,true)}
+  };
+  await Promise.allSettled([observations(),monitor()]);
 }
 function formatBytes(n:number){for(const[u,v]of[["TiB",2**40],["GiB",2**30],["MiB",2**20]] as [string,number][]){if(n>=v)return(n/v).toFixed(1)+" "+u}return n+" B"}
-rangeButtons();refresh();setInterval(refresh,5000);addEventListener("resize",()=>{loadSeries()});
+addEventListener("hashchange",navigate);navigate();setInterval(()=>{if(!document.hidden)void refresh()},5000);addEventListener("visibilitychange",()=>{if(!document.hidden)void refresh()});addEventListener("resize",()=>{if(page==="details")loadSeries()});
