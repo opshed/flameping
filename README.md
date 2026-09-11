@@ -23,12 +23,7 @@ sort, or filter for deadline misses, active obsess probing, local collection
 issues, and stale or missing observations. Each target's latest result appears
 separately from its recent history, so one good ping doesn't hide a rough spell.
 
-> **Screenshot placeholder — Overview**
->
-> The all-target dashboard: recent latency, deadline misses, small trends, and
-> active faster probing in one view.
-
-<!-- Future screenshot: docs/images/overview.png -->
+![Flameping overview comparing latency, deadline misses, probing status, and route activity across targets](docs/images/overview.png)
 
 ## Follow a target through time
 
@@ -37,12 +32,7 @@ into the latency and loss history, inspect changed traceroute hops, and compare
 local interface counter activity in that period. Select a route or interface
 interval to reveal its recorded details; chart presets return to a live view.
 
-> **Screenshot placeholder — Target detail**
->
-> One target's latency and loss chart, with local interface activity and
-> confirmed route changes aligned to the same time window.
-
-<!-- Future screenshot: docs/images/target-detail.png -->
+![Flameping target detail showing 24 hours of latency and loss for Cloudflare DNS, with local interface activity below](docs/images/target-detail.png)
 
 ## Quick start
 
