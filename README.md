@@ -1,5 +1,7 @@
 # Flameping
 
+<img src="docs/images/logo.png" alt="Flameping logo" width="480">
+
 Flameping continuously pings your targets and graphs latency and packet loss
 over time. Compare connections at a glance, then zoom into a slowdown to see
 route changes and local interface activity alongside your ping history.

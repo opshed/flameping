@@ -584,7 +584,7 @@ const server = createServer(async (request, response) => {
   try {
     let body = await readFile(join(dist, file));
     if (fixtureMode && file === "index.html") body = Buffer.from(body.toString().replace("</body>", `<script src="${url.searchParams.has("screenshot")?"/__smoke/screenshot.js":"/__smoke/automation.js"}"></script></body>`));
-    response.writeHead(200, {"content-type":extname(file)===".js"?"text/javascript":extname(file)===".css"?"text/css":"text/html"});
+    response.writeHead(200, {"content-type":extname(file)===".js"?"text/javascript":extname(file)===".css"?"text/css":extname(file)===".png"?"image/png":"text/html"});
     response.end(body);
   } catch {
     response.writeHead(404).end();

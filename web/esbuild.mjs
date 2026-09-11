@@ -12,3 +12,4 @@ await esbuild.build({
   target: ["es2022"],
 });
 await cp("src/index.html", `${out}/index.html`);
+await cp("public/icon.png", `${out}/icon.png`);
