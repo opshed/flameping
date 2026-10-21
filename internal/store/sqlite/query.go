@@ -52,6 +52,18 @@ type PingPoint struct {
 	Partial         bool      `json:"partial,omitempty"`
 	Tail            []TailBin `json:"tail,omitempty"`
 	TailTruncated   bool      `json:"tail_truncated,omitempty"`
+	// Worst and Misses come from raw samples and are present only for buckets
+	// inside raw retention (see attachExactSamples).
+	Worst  []WorstSample `json:"worst,omitempty"`
+	Misses []int64       `json:"misses,omitempty"`
+}
+
+// WorstSample is one exact slow reply: its scheduled time, RTT, and whether it
+// arrived after the probe timeout.
+type WorstSample struct {
+	TimeMS int64   `json:"time_ms"`
+	RTTMS  float64 `json:"rtt_ms"`
+	Late   bool    `json:"late"`
 }
 
 // TailBin is one histogram bin of a bucket's slow tail: the bin midpoint
@@ -241,10 +253,98 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 	if len(points) > maxPoints {
 		return PingSeries{}, fmt.Errorf("query planner produced %d points over cap %d", len(points), maxPoints)
 	}
+	if maxPoints != 1 {
+		if err := attachExactSamples(ctx, tx, targetID, from, to, asOf, pointWidth, rawStart, pingExactSampleBudget, points); err != nil {
+			return PingSeries{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return PingSeries{}, err
 	}
 	return PingSeries{TargetID: stableID, AsOfMS: asOf.UnixMilli(), ResolutionS: max(1, int64(pointWidth/time.Second)), BucketMS: float64(pointWidth) / float64(time.Millisecond), DistributionMethod: pingDistributionMethod, DistributionCap: pingDistributionCap, Points: points, Window: window}, nil
+}
+
+const (
+	pingExactSampleCap    = 5
+	pingExactSampleBudget = 200_000
+)
+
+// attachExactSamples fills Worst and Misses on points whose buckets lie fully
+// inside raw retention, using one ordered scan of ping_samples. The scan starts
+// at max(from, first eligible bucket) so samples outside the requested window
+// never appear. It is skipped (not an error) when the eligible buckets' attempted
+// probes exceed budget.
+func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to, asOf time.Time, width time.Duration, rawStart sql.NullInt64, budget int64, points []PingPoint) error {
+	if !rawStart.Valid {
+		return nil
+	}
+	widthUS := width.Microseconds()
+	index := make(map[int64]*PingPoint, len(points))
+	var attempted int64
+	firstUS := int64(math.MaxInt64)
+	for i := range points {
+		keyUS := points[i].TimeMS * 1000
+		// AIDEV-NOTE: buckets before rawStart are skipped because raw rows may
+		// have been pruned there, so Worst/Misses would be incomplete.
+		if keyUS < rawStart.Int64 {
+			continue
+		}
+		index[keyUS] = &points[i]
+		attempted += points[i].Attempted
+		firstUS = min(firstUS, keyUS)
+	}
+	// AIDEV-NOTE: the scan is budgeted because high-rate obsess targets can have
+	// millions of raw rows per week; a wide window must fall back to the
+	// aggregate-only view rather than read them all.
+	if len(index) == 0 || attempted > budget {
+		return nil
+	}
+	rows, err := q.QueryContext(ctx, `SELECT scheduled_at_us, sent_at_us, timeout_ns,
+        local_outcome IS NULL, reply_at_us IS NULL, rtt_ns, reply_class
+        FROM ping_samples WHERE target_id=? AND scheduled_at_us>=? AND scheduled_at_us<?
+        ORDER BY scheduled_at_us`, targetID, max(from.UnixMicro(), firstUS), to.UnixMicro())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var scheduled, sent, timeout int64
+		var noLocal, noReply bool
+		var rtt sql.NullInt64
+		var class sql.NullString
+		if err := rows.Scan(&scheduled, &sent, &timeout, &noLocal, &noReply, &rtt, &class); err != nil {
+			return err
+		}
+		point := index[scheduled-scheduled%widthUS]
+		if point == nil || !noLocal {
+			continue
+		}
+		if noReply {
+			if sent+timeout/1000 <= asOf.UnixMicro() && len(point.Misses) < pingExactSampleCap {
+				point.Misses = append(point.Misses, scheduled/1000)
+			}
+			continue
+		}
+		if !rtt.Valid {
+			continue
+		}
+		sample := WorstSample{TimeMS: scheduled / 1000, RTTMS: float64(rtt.Int64) / 1e6, Late: class.String == "late"}
+		// Insert keeping highest first; ties keep the earlier sample ahead.
+		pos := len(point.Worst)
+		for pos > 0 && point.Worst[pos-1].RTTMS < sample.RTTMS {
+			pos--
+		}
+		if pos >= pingExactSampleCap {
+			continue
+		}
+		point.Worst = append(point.Worst, WorstSample{})
+		copy(point.Worst[pos+1:], point.Worst[pos:])
+		point.Worst[pos] = sample
+		if len(point.Worst) > pingExactSampleCap {
+			point.Worst = point.Worst[:pingExactSampleCap]
+		}
+	}
+	return rows.Err()
 }
 
 func roundWidth(w, base time.Duration) time.Duration {

@@ -1,13 +1,18 @@
 package sqlite
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"math"
+	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opshed/flameping/internal/histogram"
+	"github.com/opshed/flameping/internal/model"
 )
 
 func newTestAggregate() pingAggregate {
@@ -136,5 +141,115 @@ func TestPingSeriesJSONOmitsEmptyOutlierFields(t *testing.T) {
 		if strings.Contains(string(data), key) {
 			t.Fatalf("json %s contains %s", data, key)
 		}
+	}
+}
+
+// recordProbe stores one probe; rtt is only used when answered, and is late
+// when it exceeds the 1 s timeout.
+func recordProbe(t *testing.T, db *DB, runID model.RunID, target Target, sequence uint64, at time.Time, rtt time.Duration, answered bool) {
+	t.Helper()
+	p := model.ProbeEvent{Key: model.ProbeKey{RunID: runID, Sequence: sequence}, TargetID: target.ID,
+		Endpoint: netip.MustParseAddr("127.0.0.1"), ScheduledAt: at, SentAt: at, Timeout: time.Second}
+	events := []model.Event{{Kind: model.EventProbeSent, Probe: p}}
+	if answered {
+		p.ReplyAt, p.RTT, p.Responder, p.ReplyClass = at.Add(rtt), rtt, p.Endpoint, model.ReplyOnTime
+		if rtt > p.Timeout {
+			p.ReplyClass = model.ReplyLate
+		}
+		events = append(events, model.Event{Kind: model.EventProbeReply, Probe: p})
+	}
+	if err := db.applyBatch(context.Background(), events, make(map[model.ProbeKey]orphanReply)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPingSeriesReportsExactWorstAndMisses(t *testing.T) {
+	db, _, target, runID := openTestDB(t)
+	start := time.Now().Add(-30 * time.Minute).Truncate(5 * time.Minute)
+	slow := 17
+	for i := 0; i < 60; i++ {
+		at := start.Add(time.Duration(i) * 5 * time.Second)
+		switch i {
+		case slow:
+			recordProbe(t, db, runID, target, uint64(i), at, 4115*time.Millisecond, true)
+		case 3, 40:
+			recordProbe(t, db, runID, target, uint64(i), at, 0, false)
+		default:
+			recordProbe(t, db, runID, target, uint64(i), at, 8*time.Millisecond+time.Duration(i)*time.Microsecond, true)
+		}
+	}
+	series, err := db.PingSeries(context.Background(), target.StableID, start.Add(-330*time.Minute), start.Add(30*time.Minute), 73)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if series.ResolutionS != 300 {
+		t.Fatalf("resolution=%d, want 300", series.ResolutionS)
+	}
+	var point *PingPoint
+	for i := range series.Points {
+		if series.Points[i].TimeMS == start.UnixMilli() {
+			point = &series.Points[i]
+		}
+	}
+	if point == nil {
+		t.Fatalf("no bucket at %d in %+v", start.UnixMilli(), series.Points)
+	}
+	want := WorstSample{TimeMS: start.Add(time.Duration(slow) * 5 * time.Second).UnixMilli(), RTTMS: 4115, Late: true}
+	if len(point.Worst) != 5 || point.Worst[0] != want {
+		t.Fatalf("worst=%+v, want first %+v and 5 entries", point.Worst, want)
+	}
+	for i := 1; i < len(point.Worst); i++ {
+		if point.Worst[i].RTTMS > point.Worst[i-1].RTTMS || point.Worst[i].Late {
+			t.Fatalf("worst not descending/on-time: %+v", point.Worst)
+		}
+	}
+	wantMisses := []int64{start.Add(15 * time.Second).UnixMilli(), start.Add(200 * time.Second).UnixMilli()}
+	if !reflect.DeepEqual(point.Misses, wantMisses) {
+		t.Fatalf("misses=%v, want %v", point.Misses, wantMisses)
+	}
+}
+
+func readTx(t *testing.T, db *DB) *sql.Tx {
+	t.Helper()
+	tx, err := db.readers.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	return tx
+}
+
+func TestExactSamplesOnlyInsideRawRetention(t *testing.T) {
+	db, _, target, runID := openTestDB(t)
+	start := time.Now().Add(-10 * time.Minute).Truncate(time.Minute)
+	for i := 0; i < 4; i++ {
+		recordProbe(t, db, runID, target, uint64(i), start.Add(time.Duration(i)*30*time.Second), 20*time.Millisecond, true)
+	}
+	second := start.Add(time.Minute)
+	points := []PingPoint{{TimeMS: start.UnixMilli(), Attempted: 2}, {TimeMS: second.UnixMilli(), Attempted: 2}}
+	rawStart := sql.NullInt64{Int64: second.UnixMicro(), Valid: true}
+	err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(2*time.Minute), time.Now(), time.Minute, rawStart, 1000, points)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if points[0].Worst != nil || len(points[1].Worst) != 2 {
+		t.Fatalf("points=%+v", points)
+	}
+	none := []PingPoint{{TimeMS: start.UnixMilli(), Attempted: 2}}
+	if err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(2*time.Minute), time.Now(), time.Minute, sql.NullInt64{}, 1000, none); err != nil || none[0].Worst != nil {
+		t.Fatalf("no raw rows: err=%v points=%+v", err, none)
+	}
+}
+
+func TestExactSamplesSkippedOverBudget(t *testing.T) {
+	db, _, target, runID := openTestDB(t)
+	start := time.Now().Add(-10 * time.Minute).Truncate(time.Minute)
+	recordProbe(t, db, runID, target, 1, start, 20*time.Millisecond, true)
+	recordProbe(t, db, runID, target, 2, start.Add(time.Second), 0, false)
+	points := []PingPoint{{TimeMS: start.UnixMilli(), Attempted: 2}}
+	rawStart := sql.NullInt64{Int64: start.UnixMicro(), Valid: true}
+	err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(time.Minute), time.Now(), time.Minute, rawStart, 1, points)
+	if err != nil || points[0].Worst != nil || points[0].Misses != nil {
+		t.Fatalf("err=%v points=%+v", err, points)
 	}
 }
