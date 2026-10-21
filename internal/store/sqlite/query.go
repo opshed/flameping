@@ -258,7 +258,7 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 		return PingSeries{}, fmt.Errorf("query planner produced %d points over cap %d", len(points), maxPoints)
 	}
 	if maxPoints != 1 {
-		if err := attachExactSamples(ctx, tx, targetID, from, to, asOf, pointWidth, rawStart, pingExactSampleBudget, points); err != nil {
+		if err := attachExactSamples(ctx, tx, targetID, from, to, asOf, pointWidth, sourceResolution, rawStart, pingExactSampleBudget, points); err != nil {
 			return PingSeries{}, err
 		}
 	}
@@ -281,11 +281,11 @@ const (
 )
 
 // attachExactSamples fills Worst and Misses on points whose buckets lie fully
-// inside raw retention, using one ordered scan of ping_samples. The scan starts
-// at max(from, first eligible bucket) so samples outside the requested window
-// never appear. It is skipped (not an error) when the eligible buckets' attempted
-// probes exceed budget.
-func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to, asOf time.Time, width time.Duration, rawStart sql.NullInt64, budget int64, points []PingPoint) error {
+// inside raw retention, using one ordered scan of ping_samples over the same
+// samples the aggregates counted (see the scan bounds below). sourceResolution
+// is the tier that served the aggregates (0 for raw). It is skipped (not an
+// error) when the eligible buckets' attempted probes exceed budget.
+func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to, asOf time.Time, width time.Duration, sourceResolution int64, rawStart sql.NullInt64, budget int64, points []PingPoint) error {
 	if !rawStart.Valid {
 		return nil
 	}
@@ -301,6 +301,13 @@ func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to
 		keyUS := points[i].TimeMS * 1000
 		// AIDEV-NOTE: buckets before rawStart are skipped because raw rows may
 		// have been pruned there, so Worst/Misses would be incomplete.
+		// Known limitation, deliberately not handled: rawStart is the MIN over
+		// ping_samples and scheduler_gaps, and retention can leave holes after
+		// it (it prunes in 10,000-row batches, keeps rows whose minute rollup
+		// is missing or dirty, and keeps a scheduler gap until it has ended),
+		// so buckets just after rawStart may still get incomplete Worst/Misses.
+		// That is transient (pruning catches up) and confined to the
+		// raw-retention horizon, the oldest edge of raw history.
 		if keyUS < rawStart.Int64 {
 			continue
 		}
@@ -315,10 +322,30 @@ func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to
 	if len(index) == 0 || attempted > budget {
 		return nil
 	}
+	// AIDEV-NOTE: the scan covers exactly the samples the bucket counts saw, so
+	// an ember's reply is always in worst and worst never lists a reply the
+	// bucket did not count. Raw-served aggregates read [from, to), so the scan
+	// is clamped to it. Rollup-served aggregates read whole source rows from
+	// the one containing from to the one containing to, so the scan widens to
+	// those row edges. It does not start at the first bucket key: a 6h bucket
+	// is 5 minutes but counts only rows from the minute containing from, and
+	// scanning from its key would list earlier, uncounted replies (possibly
+	// above the bucket max). Limitation: when overlayDirty rebuilds the first
+	// bucket (dirty rows at the window's start), the rebuild counts rows from
+	// the bucket key, which this scan does not cover; that bucket's worst may
+	// then miss a reply until the rollup is clean.
+	scanFrom, scanTo := from, to
+	if sourceResolution != 0 {
+		source := time.Duration(sourceResolution) * time.Second
+		scanFrom = from.Truncate(source)
+		if scanTo = to.Truncate(source); scanTo.Before(to) {
+			scanTo = scanTo.Add(source)
+		}
+	}
 	rows, err := q.QueryContext(ctx, `SELECT scheduled_at_us, sent_at_us, timeout_ns,
         local_outcome IS NULL, reply_at_us IS NULL, rtt_ns, reply_class
         FROM ping_samples WHERE target_id=? AND scheduled_at_us>=? AND scheduled_at_us<?
-        ORDER BY scheduled_at_us`, targetID, max(from.UnixMicro(), firstUS), to.UnixMicro())
+        ORDER BY scheduled_at_us`, targetID, max(scanFrom.UnixMicro(), firstUS), scanTo.UnixMicro())
 	if err != nil {
 		return err
 	}

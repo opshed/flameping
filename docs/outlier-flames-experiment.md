@@ -124,7 +124,16 @@ scan) falls back to the aggregate-only view. The budget applies to
 rollup-served windows too, because the rollup-served 6h preset is the main
 view for exact worst times in hover. The scan is one ordered range read of
 `ping_samples`, separate from the aggregation pass, so raw- and rollup-served
-windows share one code path.
+windows share one code path. The scan covers the same samples the bucket
+counts saw: `[from, to)` for a raw-served window; for a rollup-served window,
+the whole source rows (minutes or hours) from the one containing `from` to the
+one containing `to`, so a spike drawn as an ember in the minute before `from`
+is also in `worst`. It does not start at the first bucket's key: a 6h bucket is
+5 minutes wide but counts only rows from the minute containing `from`. Known
+limitations: buckets just after the oldest raw row can get an incomplete
+`worst` while retention leaves holes there (transient, at the raw-retention
+horizon only), and a first bucket rebuilt from dirty rollups counts rows from
+its key that the scan does not cover.
 
 Add to `PingSeries`:
 

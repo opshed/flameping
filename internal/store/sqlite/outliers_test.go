@@ -339,6 +339,61 @@ func TestExactSamplesInFractionalMillisecondBuckets(t *testing.T) {
 	}
 }
 
+// A rollup-served window reads whole minute rows, so its first bucket counts
+// the minute that contains from and its last counts the minute that contains
+// to. The exact-sample scan must cover the same samples: a spike in the minute
+// before from (or after to) is drawn as an ember and must lead worst, and a
+// reply in an earlier minute that only shares the bucket's key is not counted
+// and must not appear.
+func TestExactSamplesMatchRollupServedEdgeBuckets(t *testing.T) {
+	db, _, target, runID := openTestDB(t)
+	ctx := context.Background()
+	base := time.Now().Add(-2 * time.Hour).Truncate(10 * time.Minute)
+	for i, probe := range []struct {
+		offset, rtt time.Duration
+	}{
+		{-30 * time.Second, 8 * time.Millisecond},    // earlier raw history: the first bucket is inside raw retention
+		{20 * time.Second, 5000 * time.Millisecond},  // minute before the first counted row; shares only the bucket key
+		{70 * time.Second, 4115 * time.Millisecond},  // the minute containing from, before from
+		{100 * time.Second, 8 * time.Millisecond},    // from = base+90s
+		{150 * time.Second, 9 * time.Millisecond},    //
+		{210 * time.Second, 10 * time.Millisecond},   //
+		{270 * time.Second, 11 * time.Millisecond},   //
+		{345 * time.Second, 3000 * time.Millisecond}, // the minute containing to, after to = base+330s
+		{370 * time.Second, 6000 * time.Millisecond}, // after the last counted row
+	} {
+		recordProbe(t, db, runID, target, uint64(i), base.Add(probe.offset), probe.rtt, true)
+	}
+	for i := 0; i < 4; i++ {
+		if err := db.recomputeDirty(ctx, 1000, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	from, to := base.Add(90*time.Second), base.Add(330*time.Second)
+	series, err := db.PingSeries(ctx, target.StableID, from, to, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if series.ResolutionS != 120 || len(series.Points) != 3 || series.Points[0].TimeMS != base.UnixMilli() {
+		t.Fatalf("resolution=%d points=%+v, want three 2-minute rollup-served buckets from %d", series.ResolutionS, series.Points, base.UnixMilli())
+	}
+	for _, point := range series.Points {
+		if point.RTTCount == 0 || point.MaxMS == nil {
+			t.Fatalf("bucket %d has no replies: %+v", point.TimeMS, point)
+		}
+		// Every bucket holds at most five replies, so worst lists all of them.
+		if int64(len(point.Worst)) != point.RTTCount || point.Worst[0].RTTMS != *point.MaxMS {
+			t.Fatalf("bucket %d: rtt_count=%d max=%v worst=%+v, want worst to list exactly the counted replies", point.TimeMS, point.RTTCount, *point.MaxMS, point.Worst)
+		}
+	}
+	if got := series.Points[0].Worst[0]; got.RTTMS != 4115 || got.TimeMS != base.Add(70*time.Second).UnixMilli() {
+		t.Fatalf("first bucket worst=%+v, want the 4,115 ms spike before from", got)
+	}
+	if got := series.Points[2].Worst[0]; got.RTTMS != 3000 || got.TimeMS != base.Add(345*time.Second).UnixMilli() {
+		t.Fatalf("last bucket worst=%+v, want the 3,000 ms spike after to", got)
+	}
+}
+
 func readTx(t *testing.T, db *DB) *sql.Tx {
 	t.Helper()
 	tx, err := db.readers.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
@@ -358,7 +413,7 @@ func TestExactSamplesOnlyInsideRawRetention(t *testing.T) {
 	second := start.Add(time.Minute)
 	points := []PingPoint{{TimeMS: start.UnixMilli(), Attempted: 2}, {TimeMS: second.UnixMilli(), Attempted: 2}}
 	rawStart := sql.NullInt64{Int64: second.UnixMicro(), Valid: true}
-	err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(2*time.Minute), time.Now(), time.Minute, rawStart, 1000, points)
+	err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(2*time.Minute), time.Now(), time.Minute, 0, rawStart, 1000, points)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +421,7 @@ func TestExactSamplesOnlyInsideRawRetention(t *testing.T) {
 		t.Fatalf("points=%+v", points)
 	}
 	none := []PingPoint{{TimeMS: start.UnixMilli(), Attempted: 2}}
-	if err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(2*time.Minute), time.Now(), time.Minute, sql.NullInt64{}, 1000, none); err != nil || none[0].Worst != nil {
+	if err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(2*time.Minute), time.Now(), time.Minute, 0, sql.NullInt64{}, 1000, none); err != nil || none[0].Worst != nil {
 		t.Fatalf("no raw rows: err=%v points=%+v", err, none)
 	}
 }
@@ -378,7 +433,7 @@ func TestExactSamplesSkippedOverBudget(t *testing.T) {
 	recordProbe(t, db, runID, target, 2, start.Add(time.Second), 0, false)
 	points := []PingPoint{{TimeMS: start.UnixMilli(), Attempted: 2}}
 	rawStart := sql.NullInt64{Int64: start.UnixMicro(), Valid: true}
-	err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(time.Minute), time.Now(), time.Minute, rawStart, 1, points)
+	err := attachExactSamples(context.Background(), readTx(t, db), target.ID, start, start.Add(time.Minute), time.Now(), time.Minute, 0, rawStart, 1, points)
 	if err != nil || points[0].Worst != nil || points[0].Misses != nil {
 		t.Fatalf("err=%v points=%+v", err, points)
 	}
@@ -403,7 +458,7 @@ func TestExactSamplesSkippedOverBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		points := []PingPoint{{TimeMS: start.UnixMilli(), Attempted: int64((tc.span + tc.bucket) / tc.interval)}}
-		err = attachExactSamples(context.Background(), tx, target.ID, start, start.Add(time.Minute), time.Now(), time.Minute, rawStart, pingExactSampleBudget, points)
+		err = attachExactSamples(context.Background(), tx, target.ID, start, start.Add(time.Minute), time.Now(), time.Minute, 0, rawStart, pingExactSampleBudget, points)
 		_ = tx.Rollback()
 		if err != nil || (points[0].Worst != nil) != tc.attached {
 			t.Errorf("%v at %v (%d probes): err=%v worst=%+v, want attached=%v", tc.span, tc.interval, points[0].Attempted, err, points[0].Worst, tc.attached)
