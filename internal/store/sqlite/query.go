@@ -265,9 +265,16 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 	return PingSeries{TargetID: stableID, AsOfMS: asOf.UnixMilli(), ResolutionS: max(1, int64(pointWidth/time.Second)), BucketMS: float64(pointWidth) / float64(time.Millisecond), DistributionMethod: pingDistributionMethod, DistributionCap: pingDistributionCap, Points: points, Window: window}, nil
 }
 
+// AIDEV-NOTE: exact-sample budget. The detail page re-requests the series
+// every 5 s, so the budget bounds the cost of every poll, not one view.
+// 30,000 attempted probes covers the 1h, 6h, and 24h presets at a 5 s interval,
+// 1h and 6h at 1 s, and drag-zooms; a 7d preset at 5 s (~121k probes, a
+// ~690 ms ordered scan) falls back to aggregates. It is not limited to
+// raw-served windows because the rollup-served 6h preset is the operator's
+// main view for exact worst times in hover.
 const (
 	pingExactSampleCap    = 5
-	pingExactSampleBudget = 200_000
+	pingExactSampleBudget = 30_000
 )
 
 // attachExactSamples fills Worst and Misses on points whose buckets lie fully
@@ -298,9 +305,10 @@ func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to
 		attempted += points[i].Attempted
 		firstUS = min(firstUS, keyUS)
 	}
-	// AIDEV-NOTE: the scan is budgeted because high-rate obsess targets can have
-	// millions of raw rows per week; a wide window must fall back to the
-	// aggregate-only view rather than read them all.
+	// AIDEV-NOTE: the scan is budgeted (pingExactSampleBudget) because high-rate
+	// obsess targets can have millions of raw rows per week and the page polls
+	// every 5 s; a wide window falls back to the aggregate-only view rather
+	// than read them all.
 	if len(index) == 0 || attempted > budget {
 		return nil
 	}

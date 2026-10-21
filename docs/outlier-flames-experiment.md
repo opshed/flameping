@@ -101,11 +101,16 @@ Add to each `PingPoint` (`/api/v1/targets/{target}/ping`):
   most 5 (the count is already in `unanswered`).
 
 `worst` and `misses` are present only for buckets fully inside raw retention,
-and only when the window's attempted-probe count (known from the aggregates
-before the scan) is within a row budget; the scan is one ordered range read of
-`ping_samples` for the window, separate from the aggregation pass (raw-served
-windows are short drag-zooms, so the second read is cheap and keeps one code
-path).
+and only when those buckets' attempted-probe count (known from the aggregates
+before the scan) is at most 30,000. The detail page re-requests the series
+every 5 s, so the budget bounds the cost of every poll: it covers the 1h, 6h,
+and 24h presets at a 5 s interval, the 1h and 6h presets at 1 s, and
+drag-zooms, while a 7d preset at 5 s (about 121,000 probes, a ~690 ms ordered
+scan) falls back to the aggregate-only view. The budget applies to
+rollup-served windows too, because the rollup-served 6h preset is the main
+view for exact worst times in hover. The scan is one ordered range read of
+`ping_samples`, separate from the aggregation pass, so raw- and rollup-served
+windows share one code path.
 
 Add to `PingSeries`:
 
@@ -196,12 +201,16 @@ row stays.
 ### Behaviour by range
 
 - **1h, 6h, 24h**: sky mode whenever the window has replies ≥ 3× the seam; lane
-  numerals visible; exact worst samples in hover.
+  numerals visible; exact worst samples in hover (within the 30,000-probe
+  budget: every preset here at a 5 s interval, and 1h and 6h at 1 s).
 - **7d, 30d**: tail bins come from hour-rollup histograms, so one 4 s reply among
   2,880 pings is still a bright ember at the right height. Lane numerals are
   hidden (slots < 13 px) but bars keep the 3 px floor; counts are in hover.
-  Exact samples appear in hover only while the window is within raw retention
-  and the row budget.
+  Hover usually lists tail bins rather than exact samples: a 7d window at a 5 s
+  interval is about 121,000 probes, over the 30,000-probe budget. A slower
+  target (a 60 s interval is 10,080 probes in 7d), or a window mostly outside
+  raw retention, can still get exact samples for its buckets inside raw
+  retention.
 - **Drag-zoom to about one ping per bucket**: every reply is already its own
   smoke grain, and only replies above the seam become tail entries, so a 2.5 s
   ping is still a labelled ember while normal replies stay smoke. The seam rises

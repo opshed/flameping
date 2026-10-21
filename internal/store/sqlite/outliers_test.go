@@ -302,4 +302,31 @@ func TestExactSamplesSkippedOverBudget(t *testing.T) {
 	if err != nil || points[0].Worst != nil || points[0].Misses != nil {
 		t.Fatalf("err=%v points=%+v", err, points)
 	}
+	// The detail page re-requests the series every 5 s, so the production
+	// budget must keep the scan to short windows: the 1h, 6h, and 24h presets
+	// at a 5 s interval and 1h and 6h at 1 s (with a bucket of slack for the
+	// straddling edge buckets) get exact samples; a 7d preset at 5 s does not.
+	for _, tc := range []struct {
+		span, interval, bucket time.Duration
+		attached               bool
+	}{
+		{time.Hour, 5 * time.Second, time.Minute, true},
+		{6 * time.Hour, 5 * time.Second, 5 * time.Minute, true},
+		{24 * time.Hour, 5 * time.Second, 15 * time.Minute, true},
+		{time.Hour, time.Second, time.Minute, true},
+		{6 * time.Hour, time.Second, 5 * time.Minute, true},
+		{7 * 24 * time.Hour, 5 * time.Second, time.Hour, false},
+		{24 * time.Hour, time.Second, 15 * time.Minute, false},
+	} {
+		tx, err := db.readers.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		points := []PingPoint{{TimeMS: start.UnixMilli(), Attempted: int64((tc.span + tc.bucket) / tc.interval)}}
+		err = attachExactSamples(context.Background(), tx, target.ID, start, start.Add(time.Minute), time.Now(), time.Minute, rawStart, pingExactSampleBudget, points)
+		_ = tx.Rollback()
+		if err != nil || (points[0].Worst != nil) != tc.attached {
+			t.Errorf("%v at %v (%d probes): err=%v worst=%+v, want attached=%v", tc.span, tc.interval, points[0].Attempted, err, points[0].Worst, tc.attached)
+		}
+	}
 }
