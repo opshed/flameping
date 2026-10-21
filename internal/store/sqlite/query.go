@@ -279,6 +279,10 @@ func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to
 		return nil
 	}
 	widthUS := width.Microseconds()
+	// AIDEV-NOTE: buckets are indexed by TimeMS (the bucket start truncated to
+	// milliseconds), and each sample's bucket start is truncated the same way.
+	// Drag-zoom widths are usually fractional milliseconds (e.g. 6 h / 899),
+	// so a microsecond key rebuilt from TimeMS would match almost no bucket.
 	index := make(map[int64]*PingPoint, len(points))
 	var attempted int64
 	firstUS := int64(math.MaxInt64)
@@ -289,7 +293,7 @@ func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to
 		if keyUS < rawStart.Int64 {
 			continue
 		}
-		index[keyUS] = &points[i]
+		index[points[i].TimeMS] = &points[i]
 		attempted += points[i].Attempted
 		firstUS = min(firstUS, keyUS)
 	}
@@ -315,7 +319,7 @@ func attachExactSamples(ctx context.Context, q *sql.Tx, targetID int64, from, to
 		if err := rows.Scan(&scheduled, &sent, &timeout, &noLocal, &noReply, &rtt, &class); err != nil {
 			return err
 		}
-		point := index[scheduled-scheduled%widthUS]
+		point := index[(scheduled-scheduled%widthUS)/1000]
 		if point == nil || !noLocal {
 			continue
 		}

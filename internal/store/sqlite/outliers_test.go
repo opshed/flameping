@@ -209,6 +209,44 @@ func TestPingSeriesReportsExactWorstAndMisses(t *testing.T) {
 	}
 }
 
+// A drag-zoom requests 900 points over an arbitrary span, so the raw bucket
+// width is usually not a whole number of milliseconds (here 300 s / 899 =
+// 333.705 ms) while PingPoint.TimeMS is truncated to milliseconds. Exact
+// samples must still reach their buckets.
+func TestExactSamplesInFractionalMillisecondBuckets(t *testing.T) {
+	db, _, target, runID := openTestDB(t)
+	start := time.Now().Add(-30 * time.Minute).Truncate(5 * time.Minute)
+	// Earlier raw history, so the straddling first bucket is inside raw retention.
+	recordProbe(t, db, runID, target, 1000, start.Add(-time.Minute), 9*time.Millisecond, true)
+	for i := 0; i < 60; i++ {
+		at := start.Add(time.Duration(i) * 5 * time.Second)
+		recordProbe(t, db, runID, target, uint64(i), at, 8*time.Millisecond+time.Duration(i)*time.Millisecond, i != 7)
+	}
+	series, err := db.PingSeries(context.Background(), target.StableID, start, start.Add(5*time.Minute), 900)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if width := time.Duration(series.BucketMS * float64(time.Millisecond)); width%time.Millisecond == 0 {
+		t.Fatalf("bucket width %v is whole milliseconds; fixture no longer exercises fractional widths", width)
+	}
+	worst, misses := 0, 0
+	for _, point := range series.Points {
+		if point.RTTCount > 0 && len(point.Worst) != 1 {
+			t.Fatalf("bucket %d has %d replies but worst=%+v", point.TimeMS, point.RTTCount, point.Worst)
+		}
+		for _, sample := range point.Worst {
+			if sample.TimeMS < point.TimeMS || float64(sample.TimeMS-point.TimeMS) >= series.BucketMS {
+				t.Fatalf("worst %+v outside bucket %d", sample, point.TimeMS)
+			}
+		}
+		worst += len(point.Worst)
+		misses += len(point.Misses)
+	}
+	if worst != 59 || misses != 1 {
+		t.Fatalf("worst=%d misses=%d, want 59 and 1", worst, misses)
+	}
+}
+
 func readTx(t *testing.T, db *DB) *sql.Tx {
 	t.Helper()
 	tx, err := db.readers.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
