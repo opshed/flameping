@@ -162,11 +162,17 @@ migration changes.
     otherwise `#ff8a2e`).
   - Labels: the value on the highest ember of each of the three worst buckets;
     `×n` when n ≥ 3, or n ≥ 2 and not mild, and the slot is ≥ 10 px. Text in
-    ink color on a dark backdrop; labels that would collide are skipped. Use
-    the exact `worst` value when present, otherwise prefix "≈".
+    ink color on a dark backdrop, to the right of the ember, or to the left
+    when the right side would leave the plot, overlap a placed label, or cover
+    another bucket's ember core or tail grain; a label that fits on neither
+    side is skipped (hover still has the value). Use the exact `worst` value
+    when present, otherwise prefix "≈".
 - **Layering**: embers, tail grains, and labels are drawn after the grid,
   seam, deadline, and series lines, so no line can hide one. Embers and tail
   grains get a thin dark keyline so they separate from a line beneath them.
+  Every trail keyline is drawn before any trail, and every core keyline before
+  any core, so one ember's keyline never darkens another's trail or glow in
+  the same bucket.
 
 ### Loss lanes
 

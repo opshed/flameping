@@ -215,7 +215,7 @@ const automation = `<script>
     assert(flameAxis.dataset.sky==="on"&&flameAxis.dataset.seam==="20","gateway outliers did not open a log sky above the 20 ms seam");
     const skyTicks=flameAxis.dataset.skyTicks.split(" ");
     assert(skyTicks.includes("100")&&skyTicks.includes("5k")&&!skyTicks.includes("20"),"gateway log sky ticks are not spaced logarithmically up to the 5k top: "+flameAxis.dataset.skyTicks);
-    assert(flameAxis.dataset.embers==="2"&&Number(flameAxis.dataset.emberLabels)>=1,"gateway sky outliers did not draw two labelled embers: embers="+flameAxis.dataset.embers+" labels="+flameAxis.dataset.emberLabels);
+    assert(flameAxis.dataset.embers==="2"&&flameAxis.dataset.emberLabels==="2","gateway sky outliers did not draw two labelled embers: embers="+flameAxis.dataset.embers+" labels="+flameAxis.dataset.emberLabels);
     const keyText=document.querySelector(".flame-key").textContent;
     for(const entry of ["spark","late spark","seam","deadline"])assert(keyText.includes(entry),"chart key is missing "+entry);
     assert(document.querySelector("#flame").getAttribute("aria-label").includes("embers"),"flame aria-label does not mention embers");
