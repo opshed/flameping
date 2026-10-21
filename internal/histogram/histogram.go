@@ -81,13 +81,7 @@ func (h *Histogram) Quantiles(qs []float64) []uint64 {
 		if requests[requestIndex].rank > seen {
 			continue
 		}
-		value := math.Exp((float64(idx) + 0.5) * logGamma)
-		var quantile uint64
-		if value >= float64(math.MaxUint64) {
-			quantile = math.MaxUint64
-		} else {
-			quantile = uint64(math.Round(value))
-		}
+		quantile := binValue(idx)
 		for requestIndex < len(requests) && requests[requestIndex].rank <= seen {
 			values[requests[requestIndex].index] = quantile
 			requestIndex++
@@ -106,6 +100,7 @@ type Bin struct {
 
 // TopBins returns up to limit bins whose midpoint value is at least minValue,
 // highest first. The bool reports whether more qualifying bins were left out.
+// A limit <= 0 returns no bins, with true when any bin qualifies.
 //
 // AIDEV-NOTE: Value is the same bin midpoint Quantiles reports (via binValue),
 // so Quantile(1) equals the first bin's Value. It is used to render outlier "embers".
