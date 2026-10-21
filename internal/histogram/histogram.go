@@ -99,6 +99,33 @@ func (h *Histogram) Quantiles(qs []float64) []uint64 {
 	return values
 }
 
+// Bin is one histogram bucket: its midpoint value and observation count.
+type Bin struct {
+	Value, Count uint64
+}
+
+// TopBins returns up to limit bins whose midpoint value is at least minValue,
+// highest first. The bool reports whether more qualifying bins were left out.
+//
+// AIDEV-NOTE: Value is the same bin midpoint Quantiles reports (via binValue),
+// so Quantile(1) equals the first bin's Value. It is used to render outlier "embers".
+func (h *Histogram) TopBins(minValue uint64, limit int) ([]Bin, bool) {
+	var bins []Bin
+	indices := h.indices()
+	for i := len(indices) - 1; i >= 0; i-- {
+		idx := indices[i]
+		value := binValue(idx)
+		if value < minValue {
+			break
+		}
+		if len(bins) >= limit {
+			return bins, true
+		}
+		bins = append(bins, Bin{Value: value, Count: h.buckets[idx]})
+	}
+	return bins, false
+}
+
 func (h *Histogram) MarshalBinary() ([]byte, error) {
 	indices := h.indices()
 	buf := make([]byte, 1, 1+len(indices)*4)
@@ -169,6 +196,15 @@ func bucket(value uint64) uint32 {
 		return math.MaxUint32
 	}
 	return uint32(idx)
+}
+
+// binValue returns the midpoint value of a bucket, saturating at MaxUint64.
+func binValue(idx uint32) uint64 {
+	value := math.Exp((float64(idx) + 0.5) * logGamma)
+	if value >= float64(math.MaxUint64) {
+		return math.MaxUint64
+	}
+	return uint64(math.Round(value))
 }
 
 func (h *Histogram) indices() []uint32 {
