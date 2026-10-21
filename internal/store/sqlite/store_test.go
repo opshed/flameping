@@ -554,7 +554,7 @@ func TestRejectsNewerDatabaseSchema(t *testing.T) {
 }
 
 func TestLossRatesExcludeLocalAndSchedulerFailures(t *testing.T) {
-	points := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: pingAggregate{scheduled: 100, attempted: 2, sent: 1, unanswered: 1, sendError: 1, schedulerMissed: 98, hist: histogram.New()}}})
+	points := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: pingAggregate{scheduled: 100, attempted: 2, sent: 1, unanswered: 1, sendError: 1, schedulerMissed: 98, hist: histogram.New()}}}, 0)
 	if len(points) != 1 || points[0].NoReplyPct != 100 || points[0].DeadlineMissPct != 100 {
 		t.Fatalf("rates=%+v", points)
 	}
@@ -565,7 +565,7 @@ func TestPingPointMeanAndAdaptiveDistribution(t *testing.T) {
 	for _, rtt := range []time.Duration{10 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond} {
 		observeRTT(&aggregate, rtt.Nanoseconds())
 	}
-	points := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: aggregate}})
+	points := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: aggregate}}, 0)
 	if len(points) != 1 {
 		t.Fatalf("points=%+v", points)
 	}
@@ -589,14 +589,14 @@ func TestPingPointMeanAndAdaptiveDistribution(t *testing.T) {
 	for i := 1; i <= 40; i++ {
 		observeRTT(&many, int64(i)*time.Millisecond.Nanoseconds())
 	}
-	capped := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: many}})[0]
+	capped := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: many}}, 0)[0]
 	if len(capped.DistributionMS) != pingDistributionCap {
 		t.Fatalf("capped distribution has %d grains, want %d", len(capped.DistributionMS), pingDistributionCap)
 	}
 }
 
 func TestPingPointOmitsRTTValuesWithoutReplies(t *testing.T) {
-	point := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: pingAggregate{hist: histogram.New()}}})[0]
+	point := aggregatesToPoints(map[int64]*queryAggregate{0: {pingAggregate: pingAggregate{hist: histogram.New()}}}, 0)[0]
 	if point.RTTCount != 0 || point.AvgMS != nil || point.DistributionMS != nil {
 		t.Fatalf("empty RTT point=%+v", point)
 	}

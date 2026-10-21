@@ -50,6 +50,27 @@ type PingPoint struct {
 	DeadlineMissPct float64   `json:"deadline_miss_pct"`
 	NoReplyPct      float64   `json:"no_reply_pct"`
 	Partial         bool      `json:"partial,omitempty"`
+	Tail            []TailBin `json:"tail,omitempty"`
+	TailTruncated   bool      `json:"tail_truncated,omitempty"`
+}
+
+// TailBin is one histogram bin of a bucket's slow tail: the bin midpoint
+// (clamped to the bucket's observed range) and how many replies it holds.
+type TailBin struct {
+	MS float64 `json:"ms"`
+	N  int64   `json:"n"`
+}
+
+// PingWindow summarizes every reply in the returned series, pooled across
+// buckets. SeamMS is the server-owned boundary between the chart's linear body
+// and its logarithmic sky.
+type PingWindow struct {
+	RTTCount int64   `json:"rtt_count"`
+	P50MS    float64 `json:"p50_ms"`
+	P95MS    float64 `json:"p95_ms"`
+	P99MS    float64 `json:"p99_ms"`
+	MaxMS    float64 `json:"max_ms"`
+	SeamMS   float64 `json:"seam_ms"`
 }
 
 type PingSeries struct {
@@ -60,11 +81,13 @@ type PingSeries struct {
 	DistributionMethod string      `json:"distribution_method"`
 	DistributionCap    int         `json:"distribution_cap"`
 	Points             []PingPoint `json:"points"`
+	Window             *PingWindow `json:"window,omitempty"`
 }
 
 const (
 	pingDistributionMethod = "midpoint_quantiles"
 	pingDistributionCap    = 17
+	pingTailCap            = 24
 )
 
 type queryAggregate struct {
@@ -209,14 +232,19 @@ func (d *DB) PingSeries(ctx context.Context, stableID string, from, to time.Time
 		}
 		aggregates = collapsed
 	}
-	points := aggregatesToPoints(aggregates)
+	window := pingWindow(aggregates)
+	var seamNS uint64
+	if window != nil {
+		seamNS = uint64(math.Round(window.SeamMS * 1e6))
+	}
+	points := aggregatesToPoints(aggregates, seamNS)
 	if len(points) > maxPoints {
 		return PingSeries{}, fmt.Errorf("query planner produced %d points over cap %d", len(points), maxPoints)
 	}
 	if err := tx.Commit(); err != nil {
 		return PingSeries{}, err
 	}
-	return PingSeries{TargetID: stableID, AsOfMS: asOf.UnixMilli(), ResolutionS: max(1, int64(pointWidth/time.Second)), BucketMS: float64(pointWidth) / float64(time.Millisecond), DistributionMethod: pingDistributionMethod, DistributionCap: pingDistributionCap, Points: points}, nil
+	return PingSeries{TargetID: stableID, AsOfMS: asOf.UnixMilli(), ResolutionS: max(1, int64(pointWidth/time.Second)), BucketMS: float64(pointWidth) / float64(time.Millisecond), DistributionMethod: pingDistributionMethod, DistributionCap: pingDistributionCap, Points: points, Window: window}, nil
 }
 
 func roundWidth(w, base time.Duration) time.Duration {
@@ -567,7 +595,48 @@ func mergeQueryAggregate(result map[int64]*queryAggregate, key int64, source pin
 	dest.partial = dest.partial || partial
 }
 
-func aggregatesToPoints(aggregates map[int64]*queryAggregate) []PingPoint {
+// niceCeil rounds x up to the next value in {1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6,
+// 8} x 10^k.
+func niceCeil(x float64) float64 {
+	if x <= 0 || math.IsInf(x, 0) || math.IsNaN(x) {
+		return x
+	}
+	scale := math.Pow(10, math.Floor(math.Log10(x)))
+	for _, step := range [...]float64{1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8} {
+		// Relative slack absorbs float error so exact steps (1000) stay put.
+		if x <= step*scale*(1+1e-9) {
+			return step * scale
+		}
+	}
+	return 10 * scale
+}
+
+// pingWindow pools every bucket's histogram into window-wide quantiles and
+// derives the seam. It returns nil when the window holds no replies.
+func pingWindow(aggregates map[int64]*queryAggregate) *PingWindow {
+	pooled := histogram.New()
+	var count, maxNS int64
+	for _, a := range aggregates {
+		if a.rttCount == 0 || a.hist == nil {
+			continue
+		}
+		count += a.rttCount
+		maxNS = max(maxNS, a.rttMax)
+		pooled.Merge(a.hist)
+	}
+	if count == 0 {
+		return nil
+	}
+	q := pooled.Quantiles([]float64{0.50, 0.95, 0.99})
+	window := &PingWindow{RTTCount: count, P50MS: float64(q[0]) / 1e6, P95MS: float64(q[1]) / 1e6,
+		P99MS: float64(q[2]) / 1e6, MaxMS: float64(maxNS) / 1e6}
+	// AIDEV-NOTE: The server owns the seam so the tail rule below and the
+	// chart's axis split always agree; the client uses seam_ms as given.
+	window.SeamMS = niceCeil(2 * window.P95MS)
+	return window
+}
+
+func aggregatesToPoints(aggregates map[int64]*queryAggregate, seamNS uint64) []PingPoint {
 	keys := make([]int64, 0, len(aggregates))
 	for key := range aggregates {
 		keys = append(keys, key)
@@ -595,6 +664,29 @@ func aggregatesToPoints(aggregates map[int64]*queryAggregate) []PingPoint {
 				value = max(uint64(a.rttMin), min(value, uint64(a.rttMax)))
 				point.DistributionMS[i] = float64(value) / 1e6
 			}
+			// AIDEV-NOTE: Tail rule. A bin is a tail entry if it is strictly
+			// above the window seam (every bucket, so a lone reply in a one-ping
+			// bucket or a slow cluster sharing one bin is always sent), or, in
+			// buckets with more replies than smoke grains, at or above
+			// max(4*p50, p95). The body rule uses >= so a slow cluster that
+			// contains the bucket's p95 still qualifies. The 17-reply gate exists
+			// because buckets at or under pingDistributionCap already draw every
+			// reply as its own grain, so they get no below-seam tail.
+			threshold := uint64(math.MaxUint64)
+			if seamNS > 0 {
+				threshold = seamNS + 1
+			}
+			if a.rttCount > pingDistributionCap {
+				threshold = min(threshold, max(4*quantiles[0], quantiles[1]))
+			}
+			bins, truncated := a.hist.TopBins(threshold, pingTailCap)
+			for _, bin := range bins {
+				// Qualification used the unclamped midpoint; only the reported
+				// value is clamped so the bucket max stays exact.
+				value := max(uint64(a.rttMin), min(bin.Value, uint64(a.rttMax)))
+				point.Tail = append(point.Tail, TailBin{MS: float64(value) / 1e6, N: int64(bin.Count)})
+			}
+			point.TailTruncated = truncated
 		}
 		if a.timeoutMin > 0 {
 			minimum, maximum := float64(a.timeoutMin)/1e6, float64(a.timeoutMax)/1e6
