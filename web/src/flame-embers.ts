@@ -14,10 +14,12 @@ const trailWidth=(count:number)=>count>=4?4:count>=2?3:1.8,coreRadius=(count:num
 // density would draw a 4 s ping as the same faint speck as a 30 ms one. The fixed 20× floor stops a short sky (top barely past 3× the seam) from making a
 // modest excursion look maximal. The mild gate (on time and sev < .35, i.e. under ~2.85× the seam on a 20× sky) keeps near-seam values as plain tail grains
 // so only genuinely slow or late replies flame. Mild embers stay in `embers` (flagged) for the ×n label rule and are also drawn from `grains`.
+// AIDEV-NOTE: `late` is the server's per-bin flag (query.go), never derived from the value: a ~2%-wide bin's midpoint can sit past the deadline
+// while it holds only on-time replies, and a red spark must never imply a late ping that did not happen. A bin mixing late and on-time replies arrives unflagged.
 export function classifyTail(points:Point[],layout:SkyLayout):{embers:Ember[],grains:TailGrain[]}{
   const embers:Ember[]=[],grains:TailGrain[]=[],{sky,seam,top}=layout,span=Math.log(Math.max(top/seam,20));
-  points.forEach((point,index)=>{for(const{ms:value,n:count}of point.tail??[]){
-    const late=value>(point.timeout_max_ms??Infinity);
+  points.forEach((point,index)=>{for(const bin of point.tail??[]){
+    const{ms:value,n:count}=bin,late=bin.late===true;
     if(!sky||value<=seam){grains.push({index,value,late,alpha:late?.85:.7});continue}
     const severity=Math.max(0,Math.min(1,Math.log(value/seam)/span)),mild=!late&&severity<.35;
     embers.push({index,value,count,late,severity,mild});if(mild)grains.push({index,value,late,alpha:.55+.6*severity});

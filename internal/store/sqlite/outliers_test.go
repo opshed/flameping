@@ -119,6 +119,83 @@ func TestTailCapOrderAndCount(t *testing.T) {
 	}
 }
 
+// withTimeouts records the bucket's probe timeouts and late count as the store
+// does: a reply is late iff its RTT exceeds its own probe's timeout.
+func withTimeouts(a *pingAggregate, minTimeout, maxTimeout time.Duration, late int64) {
+	a.timeoutMin, a.timeoutMax, a.late = minTimeout.Nanoseconds(), maxTimeout.Nanoseconds(), late
+}
+
+func tailLate(tail []TailBin) []bool {
+	flags := make([]bool, len(tail))
+	for i, bin := range tail {
+		flags[i] = bin.Late
+	}
+	return flags
+}
+
+// A 995 ms on-time reply shares the histogram bin whose midpoint is just past
+// the 1,000 ms deadline. Judged by value it would be drawn as a late spark that
+// never happened; only the bucket's one late reply may be flagged.
+func TestTailLateFlagIgnoresBinMidpointPastDeadline(t *testing.T) {
+	a := newTestAggregate()
+	observeMany(&a, 58, 8*time.Millisecond)
+	observeMany(&a, 1, 995*time.Millisecond)
+	observeMany(&a, 1, 4115*time.Millisecond)
+	withTimeouts(&a, time.Second, time.Second, 1)
+	tail := aggregatesToPoints(singleBucket(a), uint64(200*time.Millisecond))[0].Tail
+	if len(tail) != 2 || tail[1].N != 1 || tail[1].MS <= 1000 {
+		t.Fatalf("tail=%+v, want the 995 ms reply's bin reported above the 1,000 ms deadline", tail)
+	}
+	if got := tailLate(tail); !reflect.DeepEqual(got, []bool{true, false}) {
+		t.Fatalf("late=%v for tail %+v, want only the 4,115 ms bin late", got, tail)
+	}
+}
+
+func TestTailLateFlagOnLoneLateReply(t *testing.T) {
+	a := newTestAggregate()
+	observeMany(&a, 59, 8*time.Millisecond)
+	observeMany(&a, 1, 4115*time.Millisecond)
+	withTimeouts(&a, time.Second, time.Second, 1)
+	tail := aggregatesToPoints(singleBucket(a), uint64(200*time.Millisecond))[0].Tail
+	if len(tail) != 1 || !tail[0].Late {
+		t.Fatalf("tail=%+v, want one late bin", tail)
+	}
+}
+
+// One late (1,005 ms) and one on-time (999 ms) reply share a bin. Flagging it
+// would imply two late pings, so it is not flagged; the lane count stays exact.
+func TestTailLateFlagSkipsBinMixingLateAndOnTime(t *testing.T) {
+	a := newTestAggregate()
+	observeMany(&a, 58, 8*time.Millisecond)
+	observeMany(&a, 1, 999*time.Millisecond)
+	observeMany(&a, 1, 1005*time.Millisecond)
+	withTimeouts(&a, time.Second, time.Second, 1)
+	tail := aggregatesToPoints(singleBucket(a), uint64(200*time.Millisecond))[0].Tail
+	if len(tail) != 1 || tail[0].N != 2 || tail[0].Late {
+		t.Fatalf("tail=%+v, want one shared bin with n=2, not late", tail)
+	}
+}
+
+// With 1 s and 2 s probes in one bucket the highest replies need not be the
+// late ones, so only bins wholly above the largest timeout can be late. Here
+// 1,995 ms is on time under 2 s yet its bin's midpoint is past 2,000 ms, and
+// 1,500 ms is late under 1 s but below the largest timeout.
+func TestTailLateFlagWithMixedTimeouts(t *testing.T) {
+	a := newTestAggregate()
+	observeMany(&a, 57, 8*time.Millisecond)
+	observeMany(&a, 1, 1500*time.Millisecond)
+	observeMany(&a, 1, 1995*time.Millisecond)
+	observeMany(&a, 1, 2500*time.Millisecond)
+	withTimeouts(&a, time.Second, 2*time.Second, 2)
+	tail := aggregatesToPoints(singleBucket(a), uint64(200*time.Millisecond))[0].Tail
+	if len(tail) != 3 || tail[1].MS <= 2000 {
+		t.Fatalf("tail=%+v, want three bins with the 1,995 ms bin reported above 2,000 ms", tail)
+	}
+	if got := tailLate(tail); !reflect.DeepEqual(got, []bool{true, false, false}) {
+		t.Fatalf("late=%v for tail %+v, want only the 2,500 ms bin late", got, tail)
+	}
+}
+
 func TestPingWindowPoolsBucketsAndOwnsSeam(t *testing.T) {
 	a, b := newTestAggregate(), newTestAggregate()
 	observeMany(&a, 60, 8*time.Millisecond)
@@ -212,6 +289,9 @@ func TestPingSeriesReportsExactWorstAndMisses(t *testing.T) {
 		if point.Worst[i].RTTMS > point.Worst[i-1].RTTMS || point.Worst[i].Late {
 			t.Fatalf("worst not descending/on-time: %+v", point.Worst)
 		}
+	}
+	if len(point.Tail) == 0 || point.Tail[0].N != 1 || !point.Tail[0].Late {
+		t.Fatalf("tail=%+v, want the lone 4,115 ms reply first and flagged late", point.Tail)
 	}
 	wantMisses := []int64{start.Add(15 * time.Second).UnixMilli(), start.Add(200 * time.Second).UnixMilli()}
 	if !reflect.DeepEqual(point.Misses, wantMisses) {

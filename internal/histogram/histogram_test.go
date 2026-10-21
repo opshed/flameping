@@ -101,6 +101,11 @@ func TestTopBinsReturnsLoneOutlierHighestFirst(t *testing.T) {
 	if bins[0].Value != h.Quantile(1) {
 		t.Fatalf("value %d != Quantile(1) %d", bins[0].Value, h.Quantile(1))
 	}
+	// Low bounds every value the bin can hold: at or below the observed reply
+	// and within one bin width (gamma) of it.
+	if low := bins[0].Low; low > uint64(4115*time.Millisecond) || float64(low)*gamma <= float64(4115*time.Millisecond) || low > bins[0].Value {
+		t.Fatalf("low %d does not bound the 4115ms reply within one bin (value %d)", low, bins[0].Value)
+	}
 }
 
 func TestTopBinsLimitAndOrder(t *testing.T) {

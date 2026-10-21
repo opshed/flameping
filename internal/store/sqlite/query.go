@@ -68,10 +68,13 @@ type WorstSample struct {
 }
 
 // TailBin is one histogram bin of a bucket's slow tail: the bin midpoint
-// (clamped to the bucket's observed range) and how many replies it holds.
+// (clamped to the bucket's observed range), how many replies it holds, and
+// whether every one of them is known to be late (see the late flag rule in
+// aggregatesToPoints).
 type TailBin struct {
-	MS float64 `json:"ms"`
-	N  int64   `json:"n"`
+	MS   float64 `json:"ms"`
+	N    int64   `json:"n"`
+	Late bool    `json:"late,omitempty"`
 }
 
 // PingWindow summarizes every reply in the returned series, pooled across
@@ -803,11 +806,27 @@ func aggregatesToPoints(aggregates map[int64]*queryAggregate, seamNS uint64) []P
 				threshold = min(threshold, max(4*quantiles[0], quantiles[1]))
 			}
 			bins, truncated := a.hist.TopBins(threshold, pingTailCap)
+			// AIDEV-NOTE: late flag. The server decides, conservatively, so a
+			// spark never implies a late ping that did not happen; the client
+			// must not derive late from the value, because a ~2%-wide bin's
+			// midpoint can sit past the deadline while it holds only on-time
+			// replies (995 ms in a bin reported as 1,000.2 ms). With one
+			// timeout in the bucket the late replies are exactly its highest
+			// RTTs, so walking highest-first a bin is late while the running
+			// count (this bin included) stays within the bucket's late count.
+			// With mixed timeouts the highest replies need not be the late
+			// ones, so the bin must also lie wholly above the largest timeout:
+			// its lower edge, not its midpoint, is compared. A bin mixing late
+			// and on-time replies is not flagged; under-claiming is acceptable
+			// and the deadline lane count stays exact.
+			var running int64
 			for _, bin := range bins {
+				running += int64(bin.Count)
+				late := running <= a.late && (a.timeoutMin == a.timeoutMax || bin.Low > uint64(a.timeoutMax))
 				// Qualification used the unclamped midpoint; only the reported
 				// value is clamped so the bucket max stays exact.
 				value := max(uint64(a.rttMin), min(bin.Value, uint64(a.rttMax)))
-				point.Tail = append(point.Tail, TailBin{MS: float64(value) / 1e6, N: int64(bin.Count)})
+				point.Tail = append(point.Tail, TailBin{MS: float64(value) / 1e6, N: int64(bin.Count), Late: late})
 			}
 			point.TailTruncated = truncated
 		}

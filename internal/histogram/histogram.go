@@ -93,9 +93,10 @@ func (h *Histogram) Quantiles(qs []float64) []uint64 {
 	return values
 }
 
-// Bin is one histogram bucket: its midpoint value and observation count.
+// Bin is one histogram bucket: its midpoint value, a lower bound on every
+// value it can hold, and its observation count.
 type Bin struct {
-	Value, Count uint64
+	Value, Low, Count uint64
 }
 
 // TopBins returns up to limit bins whose midpoint value is at least minValue,
@@ -116,7 +117,7 @@ func (h *Histogram) TopBins(minValue uint64, limit int) ([]Bin, bool) {
 		if len(bins) >= limit {
 			return bins, true
 		}
-		bins = append(bins, Bin{Value: value, Count: h.buckets[idx]})
+		bins = append(bins, Bin{Value: value, Low: binLow(idx), Count: h.buckets[idx]})
 	}
 	return bins, false
 }
@@ -191,6 +192,16 @@ func bucket(value uint64) uint32 {
 		return math.MaxUint32
 	}
 	return uint32(idx)
+}
+
+// binLow returns a lower bound on the values a bucket holds: bucket idx holds
+// values v with floor(ln v / ln gamma) == idx, so v >= gamma^idx.
+func binLow(idx uint32) uint64 {
+	value := math.Exp(float64(idx) * logGamma)
+	if value >= float64(math.MaxUint64) {
+		return math.MaxUint64
+	}
+	return uint64(math.Floor(value))
 }
 
 // binValue returns the midpoint value of a bucket, saturating at MaxUint64.

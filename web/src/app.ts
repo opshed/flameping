@@ -216,11 +216,11 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
     host.dataset.localGaps=points.some(point=>point.send_errors>0||point.scheduler_missed>0)?"rendered":"none";
   }],
   // AIDEV-NOTE: embers, tail grains, and their labels draw in the draw hook, after the grid, seam, deadline, and series lines, so no line can hide a rare slow
-  // ping. dataset.embers counts flaming (non-mild) embers; mild sky values are drawn and counted as tail grains.
+  // ping. dataset.embers counts flaming (non-mild) embers and dataset.lateEmbers the late ones among them; mild sky values are drawn and counted as tail grains.
   draw:[u=>{
     const points=state.points,result=classifyTail(points,state.layout),host=u.root.parentElement??u.root;
     host.dataset.emberLabels=String(points.length?drawEmbers(u,points,flameSlots(u,points).slots,result,state.layout):0);
-    host.dataset.embers=String(result.embers.filter(ember=>!ember.mild).length);host.dataset.tailGrains=String(result.grains.length);
+    const flames=result.embers.filter(ember=>!ember.mild);host.dataset.embers=String(flames.length);host.dataset.lateEmbers=String(flames.filter(ember=>ember.late).length);host.dataset.tailGrains=String(result.grains.length);
   }]}};
 }
 

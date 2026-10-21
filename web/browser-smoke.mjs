@@ -47,6 +47,8 @@ const fixtures = {
 };
 
 // Gateway carries two slow outliers above its 20 ms seam (one lone 4,115 ms reply, three 4,300 ms replies), so its axis gains a log sky; backup stays linear.
+// The 4,300 ms bucket also holds an on-time ~995 ms reply whose histogram bin the server reports as 1,005 ms, past the 1 s deadline. Only the server's
+// per-bin late flag may make a spark late, so that bin must draw as an on-time ember: two late embers of three.
 // The gateway seam carries float noise as server arithmetic can emit; the client must clean it to 20 or the axis duplicates its 20 ms body tick.
 // Backup's window max bounds every point max (19 + 20 × .2 ms) and stays under 3 × seam, so its one 14 ms body tail is a tail grain, not an ember.
 const pingWindows = {gateway:{rtt_count:1200,p50_ms:3,p95_ms:9,p99_ms:15,max_ms:4300,seam_ms:20.000000000000004}, backup:{rtt_count:1200,p50_ms:3,p95_ms:9,p99_ms:13,max_ms:23,seam_ms:20}};
@@ -58,7 +60,7 @@ function points(from, to, target) {
     const schedulerMissed = i === 12 ? 8 : 0;
     const attempted = 60;
     const sent = attempted - sendErrors;
-    const spike = gateway ? {9:{ms:4115,n:1},16:{ms:4300,n:3}}[i] : undefined;
+    const spike = gateway ? {9:{ms:4115,n:1,late:true},16:{ms:4300,n:3,late:true}}[i] : undefined;
     const late = noReplyOnly ? 0 : Math.max(i % 7 === 0 ? 2 : 0, spike?.n ?? 0);
     const unanswered = noReplyOnly ? sent : i % 11 === 0 ? 1 : 0;
     const distribution = noReplyOnly ? undefined : Array.from({length:17}, (_, grain) => grain < 11 ? 1.55+i*.08+grain*.055 : 8.4+i*.12+(grain-11)*.42);
@@ -75,7 +77,7 @@ function points(from, to, target) {
       p95_ms:10.25+i*.12, p99_ms:13.5+i*.15, max_ms:19+i*.2,
       distribution_ms:distribution,
     });
-    if (spike) Object.assign(point, {max_ms:spike.ms, tail:[spike], ...(spike.n === 1 ? {worst:[{time_ms:Math.round(point.time_ms+Math.min(4000,step/2)), rtt_ms:spike.ms, late:true}]} : {})});
+    if (spike) Object.assign(point, {max_ms:spike.ms, tail:i === 16 ? [spike, {ms:1005,n:1}] : [spike], ...(spike.n === 1 ? {worst:[{time_ms:Math.round(point.time_ms+Math.min(4000,step/2)), rtt_ms:spike.ms, late:true}]} : {})});
     if (!gateway && i === 1) Object.assign(point, {max_ms:14, tail:[{ms:14,n:1}]});
     return point;
   });
@@ -215,7 +217,8 @@ const automation = `<script>
     assert(flameAxis.dataset.sky==="on"&&flameAxis.dataset.seam==="20","gateway outliers did not open a log sky above the 20 ms seam");
     const skyTicks=flameAxis.dataset.skyTicks.split(" ");
     assert(skyTicks.includes("100")&&skyTicks.includes("5k")&&!skyTicks.includes("20"),"gateway log sky ticks are not spaced logarithmically up to the 5k top: "+flameAxis.dataset.skyTicks);
-    assert(flameAxis.dataset.embers==="2"&&flameAxis.dataset.emberLabels==="2","gateway sky outliers did not draw two labelled embers: embers="+flameAxis.dataset.embers+" labels="+flameAxis.dataset.emberLabels);
+    assert(flameAxis.dataset.embers==="3"&&flameAxis.dataset.emberLabels==="2","gateway sky outliers did not draw three embers with two labelled buckets: embers="+flameAxis.dataset.embers+" labels="+flameAxis.dataset.emberLabels);
+    assert(flameAxis.dataset.lateEmbers==="2","only the two server-flagged late bins may draw as late sparks: lateEmbers="+flameAxis.dataset.lateEmbers);
     const keyText=document.querySelector(".flame-key").textContent;
     for(const entry of ["spark","late spark","seam","deadline"])assert(keyText.includes(entry),"chart key is missing "+entry);
     assert(document.querySelector("#flame").getAttribute("aria-label").includes("embers"),"flame aria-label does not mention embers");

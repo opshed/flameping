@@ -77,7 +77,7 @@ moved lost pings into an ember row at the top. **C was selected.**
 
 Add to each `PingPoint` (`/api/v1/targets/{target}/ping`):
 
-- `tail: [{ms, n}]` — histogram bins of that bucket that qualify, highest
+- `tail: [{ms, n, late}]` — histogram bins of that bucket that qualify, highest
   first, at most 24 entries, plus `tail_truncated: bool` when more bins
   qualified. A bin qualifies when either:
   - its value is above the window seam (`window.seam_ms`, below), in any
@@ -95,6 +95,20 @@ Add to each `PingPoint` (`/api/v1/targets/{target}/ping`):
   exact); `n` is the bin's count. Computed from the same merged histogram as
   the quantiles, so raw, minute, and hour tiers behave identically.
   Invariant: `sum(n) ≤ rtt_count`.
+
+  `late` (omitted when false) is the server's conservative judgement that every
+  reply in the bin is late. A bin is about 2% wide and its midpoint can sit
+  past the deadline while it holds only on-time replies (a 995 ms reply can be
+  reported as 1,000.2 ms), so the value alone must not decide. Walking the bins
+  highest first with a running count `c` that includes the current bin, a bin
+  is late iff `c ≤ late` (the bucket's late count): with one timeout in the
+  bucket, the late replies are exactly its highest RTTs. When the bucket mixes
+  timeouts (`timeout_min_ms ≠ timeout_max_ms`) the highest replies need not be
+  the late ones, so the bin must also lie wholly above `timeout_max_ms`: its
+  lower edge, not its midpoint, is compared, since a 1,995 ms on-time reply
+  under a 2 s timeout sits in a bin reported as 2,000.3 ms. A bin that mixes
+  late and on-time replies is not flagged. Under-claiming is acceptable; the
+  deadline-lane count stays exact.
 - `worst: [{time_ms, rtt_ms, late}]` — the bucket's highest RTT replies, at most
   5, exact values and scheduled times from `ping_samples`.
 - `misses: [time_ms]` — scheduled times of the bucket's unanswered pings, at
@@ -152,10 +166,12 @@ migration changes.
 - **Tail grains**: tail entries that are not embers (all tail values without
   sky mode, tail values below the seam, and mild sky values) are drawn as
   guaranteed-visible grains: brighter than smoke (orange
-  `rgba(255,190,110,.7)`; red `rgba(255,120,90,.85)` when late), 4 px tall,
+  `rgba(255,190,110,.7)`; red `rgba(255,120,90,.85)` when the bin is flagged
+  late), 4 px tall,
   slot-width like smoke grains. Mild sky values use alpha `.55 + .6·sev`.
 - **Embers** (sky mode only), for each tail entry with `v > S`:
-  - `sev = clamp(ln(v/S) / ln(max(top/S, 20)), 0, 1)`, `late = v > timeout_max_ms`.
+  - `sev = clamp(ln(v/S) / ln(max(top/S, 20)), 0, 1)`; `late` is the bin's
+    server flag (`tail[].late`), never derived from `v` and the deadline.
   - Mild: `!late && sev < .35` → tail grain as above, no trail or glow.
   - Otherwise a tapered flame trail from `y(min(p95, S))` up to `v`: base width
     1.8 / 3 / 4 px for n = 1 / 2–3 / ≥ 4, plus `1.6·sev`, capped at 55% of the
