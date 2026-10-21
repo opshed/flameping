@@ -47,7 +47,9 @@ const fixtures = {
 };
 
 // Gateway carries two slow outliers above its 20 ms seam (one lone 4,115 ms reply, three 4,300 ms replies), so its axis gains a log sky; backup stays linear.
-const pingWindows = {gateway:{rtt_count:1200,p50_ms:3,p95_ms:9,p99_ms:15,max_ms:4300,seam_ms:20}, backup:{rtt_count:1200,p50_ms:3,p95_ms:9,p99_ms:13,max_ms:15,seam_ms:20}};
+// The gateway seam carries float noise as server arithmetic can emit; the client must clean it to 20 or the axis duplicates its 20 ms body tick.
+// Backup's window max bounds every point max (19 + 20 × .2 ms) and stays under 3 × seam, so its one 14 ms body tail is a tail grain, not an ember.
+const pingWindows = {gateway:{rtt_count:1200,p50_ms:3,p95_ms:9,p99_ms:15,max_ms:4300,seam_ms:20.000000000000004}, backup:{rtt_count:1200,p50_ms:3,p95_ms:9,p99_ms:13,max_ms:23,seam_ms:20}};
 function points(from, to, target) {
   const step = (to - from) / 20, gateway = target === "gateway";
   return Array.from({length:21}, (_, i) => {
@@ -74,6 +76,7 @@ function points(from, to, target) {
       distribution_ms:distribution,
     });
     if (spike) Object.assign(point, {max_ms:spike.ms, tail:[spike], ...(spike.n === 1 ? {worst:[{time_ms:point.time_ms+4000, rtt_ms:spike.ms, late:true}]} : {})});
+    if (!gateway && i === 1) Object.assign(point, {max_ms:14, tail:[{ms:14,n:1}]});
     return point;
   });
 }
@@ -212,11 +215,13 @@ const automation = `<script>
     assert(flameAxis.dataset.sky==="on"&&flameAxis.dataset.seam==="20","gateway outliers did not open a log sky above the 20 ms seam");
     const skyTicks=flameAxis.dataset.skyTicks.split(" ");
     assert(skyTicks.includes("100")&&skyTicks.includes("5k")&&!skyTicks.includes("20"),"gateway log sky ticks are not spaced logarithmically up to the 5k top: "+flameAxis.dataset.skyTicks);
+    assert(flameAxis.dataset.embers==="2"&&Number(flameAxis.dataset.emberLabels)>=1,"gateway sky outliers did not draw two labelled embers: embers="+flameAxis.dataset.embers+" labels="+flameAxis.dataset.emberLabels);
     await control({targets:"failure",ping:"delay"});
     document.querySelector('#targets button[data-id="backup"]').click();
     assert(document.querySelector("#title").textContent==="Backup"&&document.querySelector("#flame").dataset.flameRendered==="empty","navigation retained old target evidence while metadata failed");
     await until(()=>document.querySelector("#flame").dataset.flameRendered==="distribution","detail loads independently of failed metadata");
     assert(flameAxis.dataset.sky==="off"&&flameAxis.dataset.skyTicks==="","backup kept the gateway log sky after a target switch");
+    assert(flameAxis.dataset.embers==="0"&&flameAxis.dataset.tailGrains==="1","backup body tail did not draw as one tail grain without embers: embers="+flameAxis.dataset.embers+" grains="+flameAxis.dataset.tailGrains);
     document.querySelector('#targets button[data-id="gateway"]').click();
     await until(()=>document.querySelector("#title").textContent==="Gateway"&&document.querySelector("#flame").dataset.flameRendered==="distribution","gateway detail recovery");
     document.body.dataset.overviewChecks="true";

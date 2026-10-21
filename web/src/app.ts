@@ -7,6 +7,7 @@ import {InterfaceHistoryView} from "./interface-history";
 import {obsessLabel,renderObsessStatus,type ObsessStatus} from "./obsess-status";
 import {OverviewView,detailLink,type MonitorStatus} from "./overview";
 import {flameBwd,flameFwd,flameSplits,formatMs,formatTick,skyLayout,type FlameWindow,type Point,type SkyLayout} from "./flame-scale";
+import {classifyTail,drawEmbers} from "./flame-embers";
 
 type Target={id:string,name:string,address:string,endpoint?:string,state:string,last_rtt_ms?:number,obsess?:ObsessStatus};
 type RangePreset={duration:number,maxPoints:number};
@@ -70,8 +71,18 @@ function flameTicks(u:uPlot){
   return[...splits.filter(tick=>tick.kind!=="sky"),...sky.sort((a,b)=>a.value-b.value)];
 }
 
+// Each bucket owns the half-gaps to its neighbours (an edge bucket mirrors its one neighbour, or takes 6 px when alone), clamped to the plot.
+function flameSlots(u:uPlot,points:Point[]){
+  const{bbox}=u,ratio=uPlot.pxRatio,right=bbox.left+bbox.width,xs=points.map(point=>u.valToPos(point.time_ms/1000,"x",true));
+  return{xs,slots:xs.map((x,index)=>{
+    const previous=index===0?x-(xs[1]==null?6*ratio:xs[1]-x):xs[index-1];
+    const next=index===xs.length-1?x+(xs[index-1]==null?6*ratio:x-xs[index-1]):xs[index+1];
+    return[Math.max(bbox.left,(previous+x)/2),Math.min(right,(x+next)/2)] as const;
+  })};
+}
+
 function flameSmokePlugin(state:FlameState):uPlot.Plugin {
-  const grainColors=["rgba(205,48,31,.28)","rgba(241,82,32,.34)","rgba(255,145,37,.40)","rgba(255,202,69,.48)","rgba(255,232,144,.58)"];
+  const grainColors=["rgba(205,48,31,.42)","rgba(241,82,32,.34)","rgba(255,145,37,.40)","rgba(255,202,69,.48)","rgba(255,232,144,.58)"];
   const visible=(u:uPlot,index:number)=>u.series[index]?.show!==false;
   const clampPct=(value:number|undefined)=>Math.max(0,Math.min(100,value??0));
   return{hooks:{drawAxes:[u=>{
@@ -85,12 +96,7 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
     const laneHeight=(railHeight-localHeight-gap*3)/2;
     const deadlineTop=railTop+localHeight+gap;
     const noReplyTop=deadlineTop+laneHeight+gap;
-    const xs=points.map(point=>u.valToPos(point.time_ms/1000,"x",true));
-    const slots=xs.map((x,index)=>{
-      const previous=index===0?x-(xs[1]==null?6*ratio:xs[1]-x):xs[index-1];
-      const next=index===xs.length-1?x+(xs[index-1]==null?6*ratio:x-xs[index-1]):xs[index+1];
-      return[Math.max(bbox.left,(previous+x)/2),Math.min(right,(x+next)/2)] as const;
-    });
+    const{xs,slots}=flameSlots(u,points);
 
     ctx.save();
     ctx.beginPath();ctx.rect(bbox.left,bbox.top,bbox.width,bbox.height);ctx.clip();
@@ -181,6 +187,13 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
     host.dataset.flameRendered=points.some(point=>point.distribution_ms?.length)?"distribution":"loss-only";
     host.dataset.lossRail=points.some(point=>point.no_reply_pct>=99.5&&point.rtt_count===0)?"full-no-rtt":"rendered";
     host.dataset.localGaps=points.some(point=>point.send_errors>0||point.scheduler_missed>0)?"rendered":"none";
+  }],
+  // AIDEV-NOTE: embers, tail grains, and their labels draw in the draw hook, after the grid, seam, deadline, and series lines, so no line can hide a rare slow
+  // ping. dataset.embers counts flaming (non-mild) embers; mild sky values are drawn and counted as tail grains.
+  draw:[u=>{
+    const points=state.points,result=classifyTail(points,state.layout),host=u.root.parentElement??u.root;
+    host.dataset.emberLabels=String(points.length?drawEmbers(u,points,flameSlots(u,points).slots,result,state.layout):0);
+    host.dataset.embers=String(result.embers.filter(ember=>!ember.mild).length);host.dataset.tailGrains=String(result.grains.length);
   }]}};
 }
 

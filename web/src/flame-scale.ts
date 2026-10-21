@@ -11,7 +11,8 @@ const clean=(v:number)=>+v.toPrecision(12);
 export function niceCeil(x:number):number{if(!(x>0)||!Number.isFinite(x))return 1;const scale=10**Math.floor(Math.log10(x));for(const step of nice)if(x<=step*scale*(1+1e-9))return clean(step*scale);return clean(10*scale)}
 
 // The server owns the seam (window.seam_ms); the client only decides whether the window's max reaches far enough above it to need a sky.
-export function skyLayout(window:FlameWindow|undefined,fallbackMax:number):SkyLayout{const seam=window?.seam_ms??0,max=window?.max_ms??fallbackMax,sky=seam>0&&max>=3*seam;return{sky,seam,top:niceCeil((sky?1.15:1.08)*max)}}
+// The seam is cleaned like the ticks so float noise (0.30000000000000004) cannot sit a hair above a body tick and duplicate it and its grid line.
+export function skyLayout(window:FlameWindow|undefined,fallbackMax:number):SkyLayout{const seam=clean(window?.seam_ms??0),max=window?.max_ms??fallbackMax,sky=seam>0&&max>=3*seam;return{sky,seam,top:niceCeil((sky?1.15:1.08)*max)}}
 
 // AIDEV-NOTE: piecewise latency scale. fwd maps ms to "latency units" where the latency area is [0,1]: linear 0→top without a sky; with a sky,
 // linear 0→seam fills the lower 62% and log10 seam→top fills the upper 38%. Below zero (the loss rail reservation, [-0.38,0]) stays linear
