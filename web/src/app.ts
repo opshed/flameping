@@ -146,9 +146,10 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
 
     // AIDEV-NOTE: lane bars scale by sqrt(pct) with a 3 css px floor so one lost ping is visible at every preset; numerals (the literal ping count) need a slot >= 13 css px.
     // dataset.laneNumerals counts the numerals actually drawn.
-    let numerals=0;
+    // Numerals are queued and drawn after every bar and the full-loss hatch, so no hatch line crosses one.
+    const pending:{text:string,x:number,y:number,inside:boolean,plate:boolean}[]=[];
     const numeralFont=`${9*ratio}px ui-sans-serif,system-ui,sans-serif`,numeralHeight=10*ratio;
-    const fillLane=(left:number,slotRight:number,top:number,value:number,count:number,color:string)=>{
+    const fillLane=(left:number,slotRight:number,top:number,value:number,count:number,color:string,fullLoss=false)=>{
       if(value<=0||slotRight<=left)return;
       const innerHeight=laneHeight-2*ratio;
       const height=Math.min(innerHeight,Math.max(3*ratio,innerHeight*Math.sqrt(value/100)));
@@ -156,14 +157,15 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
       ctx.fillStyle=color;ctx.fillRect(left+.35*ratio,barTop,Math.max(ratio,slotRight-left-.7*ratio),height);
       if(count<=0||slotRight-left<13*ratio)return;
       const inside=height>=numeralHeight;
-      ctx.save();ctx.font=numeralFont;ctx.textAlign="center";ctx.textBaseline=inside?"middle":"bottom";ctx.fillStyle=inside?"#1a0a07":"#f1d9cf";
-      ctx.fillText(String(count),(left+slotRight)/2,inside?barTop+height/2:barTop-ratio);ctx.restore();numerals++;
+      // A short bar puts the numeral above it; skip when that would poke out of the lane's top edge.
+      if(!inside&&barTop-top<numeralHeight+ratio)return;
+      pending.push({text:String(count),x:(left+slotRight)/2,y:inside?barTop+height/2:barTop-ratio,inside,plate:fullLoss});
     };
     for(let index=0;index<points.length;index++){
       const point=points[index],[left,slotRight]=slots[index];
       const deadline=clampPct(point.deadline_miss_pct),noReply=clampPct(point.no_reply_pct);
       if(visible(u,flameSeriesIndex.deadline))fillLane(left,slotRight,deadlineTop,deadline,point.late+point.unanswered,"#f4a340");
-      if(visible(u,flameSeriesIndex.noReply))fillLane(left,slotRight,noReplyTop,noReply,point.unanswered,"#ee4937");
+      if(visible(u,flameSeriesIndex.noReply))fillLane(left,slotRight,noReplyTop,noReply,point.unanswered,"#ee4937",noReply>=99.5);
       if(noReply>=99.5&&visible(u,flameSeriesIndex.noReply)&&slotRight>left){
         ctx.save();ctx.beginPath();ctx.rect(left,noReplyTop,slotRight-left,laneHeight);ctx.clip();ctx.strokeStyle="rgba(70,12,10,.72)";ctx.lineWidth=ratio;
         for(let x=left-laneHeight;x<slotRight+laneHeight;x+=5*ratio){ctx.beginPath();ctx.moveTo(x,noReplyTop+laneHeight);ctx.lineTo(x+laneHeight,noReplyTop);ctx.stroke()}
@@ -181,6 +183,13 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
       }
     }
 
+    ctx.font=numeralFont;ctx.textAlign="center";
+    for(const n of pending){
+      ctx.textBaseline=n.inside?"middle":"bottom";
+      if(n.plate){const w=ctx.measureText(n.text).width+4*ratio;ctx.fillStyle="rgba(6,11,14,.88)";ctx.fillRect(n.x-w/2,n.y-numeralHeight/2,w,numeralHeight)}
+      ctx.fillStyle=n.plate?"#f6e3da":n.inside?"#1a0a07":"#f1d9cf";ctx.fillText(n.text,n.x,n.y);
+    }
+    const numerals=pending.length;
     ctx.font=noteFont;ctx.textAlign="right";ctx.textBaseline="middle";ctx.fillStyle="rgba(150,167,176,.8)";ctx.fillText("√ scale · min 3 px · numerals = pings",right-4*ratio,railTop+localHeight*.52);
     ctx.font=`${9*ratio}px ui-sans-serif,system-ui,sans-serif`;ctx.textAlign="left";ctx.textBaseline="middle";
     for(const[label,top,color]of[["DEADLINE",deadlineTop,"#dca052"],["NO REPLY",noReplyTop,"#db6a5d"]] as [string,number,string][]){
