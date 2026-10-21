@@ -235,7 +235,9 @@ func TestExactSamplesInFractionalMillisecondBuckets(t *testing.T) {
 			t.Fatalf("bucket %d has %d replies but worst=%+v", point.TimeMS, point.RTTCount, point.Worst)
 		}
 		for _, sample := range point.Worst {
-			if sample.TimeMS < point.TimeMS || float64(sample.TimeMS-point.TimeMS) >= series.BucketMS {
+			// Both times are truncated to milliseconds, so a sample in the
+			// bucket's last fractional millisecond can sit BucketMS+<1 after it.
+			if sample.TimeMS < point.TimeMS || float64(sample.TimeMS-point.TimeMS) >= series.BucketMS+1 {
 				t.Fatalf("worst %+v outside bucket %d", sample, point.TimeMS)
 			}
 		}
