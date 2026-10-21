@@ -193,23 +193,26 @@ migration changes.
   - Labels: the value on the highest ember of each of the three worst buckets;
     `×n` when n ≥ 3, or n ≥ 2 and not mild, and the slot is ≥ 10 px. Text in
     ink color on a dark backdrop, to the right of the ember, or to the left
-    when the right side would leave the plot, overlap a placed label, or cover
-    another bucket's ember core or tail grain; a label that fits on neither
-    side is skipped (hover still has the value). Use the exact `worst` value
-    when present, otherwise prefix "≈".
+    when the right side would leave the plot, overlap a placed label, cover
+    the "LOG SCALE ABOVE" or "DEADLINE" caption, or cover another bucket's
+    ember core or tail grain; a label that fits on neither side is skipped
+    (hover still has the value). Use the exact `worst` value when present,
+    otherwise prefix "≈".
 - **Layering**: embers, tail grains, and labels are drawn after the grid,
   seam, deadline, and series lines, so no line can hide one. Embers and tail
   grains get a thin dark keyline so they separate from a line beneath them.
-  Every trail keyline is drawn before any trail, and every core keyline before
-  any core, so one ember's keyline never darkens another's trail or glow in
-  the same bucket.
+  The order is: trail keylines, trails, tail grains (each on its keyline),
+  core keylines, cores, labels. So trail keylines never darken trails, core
+  keylines never darken cores or their glow, and no trail dims a tail grain;
+  a core's keyline can still darken the part of a trail or grain it sits on.
 
 ### Loss lanes
 
 - Bar height = inner lane height × √(pct/100), with a 3 px minimum and full
   opacity, so one lost or late ping is always visible at every preset.
-- When the slot is ≥ 13 px, the literal count is centred above or inside the
-  bar (dark ink when the bar is tall).
+- When the slot is ≥ 13 px and fits the count's text plus 1 px on each side,
+  the literal count is centred above or inside the bar (dark ink when the bar
+  is tall).
 - A small right-aligned note on the rail: "√ scale · min 3 px · numerals = pings".
 - Legend values read as counts with percentages, e.g. "3 of 60 (5.0%)".
 - The full-loss hatch, send-error, scheduler-gap, and partial markers are unchanged.
@@ -221,7 +224,9 @@ count; p50 / p95 / p99 / max; late and no-reply counts with percentages; local
 send errors when present; the `worst` list with exact times and "late" marks;
 the `misses` times (with "…" when `unanswered` exceeds the list); and the first
 few tail bins with counts when `worst` is absent. The existing legend readout
-row stays.
+row stays. The tooltip is `aria-hidden` rather than a live region, since the
+legend row carries the same data and a live region would announce every
+cursor move.
 
 ### Behaviour by range
 
@@ -292,7 +297,8 @@ In summary:
 
 Each task had an independent review. Corrections included sharing the bin value
 function between quantiles and tail bins, starting the exact-sample scan at the
-requested window start so hover never lists samples outside the window,
+requested window start so hover never lists samples outside the window (later
+narrowed to raw-served windows, see the final review below),
 cleaning float noise from the seam on the client (a 0.3 ms LAN seam otherwise
 duplicated a body tick), thinning sky ticks to labels at least 12 px from the
 seam and from each other, and drawing lane numerals after the full-loss hatch,
@@ -311,8 +317,9 @@ fixed:
   the left, and refuse to cover another bucket's ember core or tail grain.
 - Each ember drew its keyline and then its trail, so later keylines dimmed the
   trails and glow already drawn in the same bucket. Stacked 4–5 s trails
-  measured 55–65% of the mockup's brightness. All keylines are now drawn first;
-  stacked trails measure within about 10% of the mockup.
+  measured 55–65% of the mockup's brightness. Trail keylines are now drawn
+  before any trail and core keylines before any core; stacked trails measure
+  within about 10% of the mockup.
 
 No size, color, or alpha constant was tuned. With the label fixed, the lone 4 s
 reply is uncovered and labelled at 6h, and lone 1–2.5 s embers match the
@@ -342,6 +349,35 @@ Validation passed:
     and its exact time in hover.
   - Cloudflare 24h: no sky, a linear 0–30 ms axis, and 23 ms tail grains.
   - fw1-internal 24h: sky above a 3 ms seam with the 48 ms ember labelled.
+
+The final whole-branch review led to these changes:
+
+- The exact-sample budget dropped from 200,000 to 30,000 probes, because the
+  page polls every 5 s and a 7d preset on a 5 s target ran a ~690 ms scan on
+  every poll.
+- Tail bins carry the server's conservative `late` flag. The client had called
+  a bin late when its value passed the deadline, which drew an on-time 995 ms
+  reply as a red late spark.
+- For rollup-served windows the exact-sample scan now covers the same source
+  rows the buckets count, so a spike in the minute before `from` is in `worst`
+  as well as drawn. Raw-served windows keep the clamp to the requested window.
+- `seam_ms` is rounded on the server, so the JSON carries 0.3, not
+  0.30000000000000004.
+- Ember labels no longer cover the seam or deadline caption. Lane numerals
+  need a slot that fits their text. Tail grains are drawn after trails. The
+  tooltip is `aria-hidden`.
+
+These were rechecked against the same database copy. JacksTailscale 6h is
+unchanged: 17 embers, including all 14 replies over 1 s; labels 5.1 s, 4.1 s,
+and 2.5 s, clear of both captions; and 25 numerals. The server flags exactly
+the 14 late bins at 6h and the 28 at 24h, and none at or below the deadline.
+In the drag-zoom, the "1.0 s" label that sat on the deadline caption is now
+skipped, and hover still has the value. Every bucket with exact samples has
+`worst[0]` equal to the bucket max in four windows: the 6h preset, a 6h window
+offset by 90 s at both ends, 24h, and 7d. The copy holds about 15,400 probes
+per target, so its 7d window stays under the budget and keeps exact samples. A
+build with the budget lowered to 10,000 dropped them for 24h and 7d and kept
+them at 6h.
 
 Known limitations: in a drag-zoom that starts on an event, the first slots'
 lane bars sit under the DEADLINE and NO REPLY name plates and the first ember
