@@ -1,6 +1,6 @@
 # Outlier flames experiment
 
-Status: proposed 2026-10-20 (variant C chosen from the mockup); not yet implemented.
+Status: implemented as an experiment, 2026-10-20 (variant C chosen from the mockup).
 
 ## Problem and intended outcome
 
@@ -235,7 +235,86 @@ work done, the built UI is also checked by eye against a copy of that database.
 ## Implementation plan
 
 See [the implementation plan](superpowers/plans/2026-10-20-outlier-flames.md).
+In summary:
+
+1. Extract highest-first tail bins from the RTT histogram, sharing one bin
+   value function with the quantiles so tails and smoke agree.
+2. Pool a window summary over the returned buckets, compute the seam on the
+   server, and attach per-bucket tail bins with the tail rule above.
+3. Attach exact `worst` replies and `misses` from one budgeted, ordered scan of
+   raw samples for buckets fully inside raw retention and the requested window.
+4. Replace the linear latency axis with the body + sky piecewise scale, seam
+   glyph and wash, warm sky ticks, and the deadline line.
+5. Draw embers with flame trails, guaranteed-visible tail grains, value and
+   `×n` labels, and brighter isolated smoke, layered above every line.
+6. Scale the loss lanes by square root with a 3 px floor, count numerals, and
+   count-and-percent legend values.
+7. Add the bucket tooltip and update the chart key, subtitle, and accessible
+   label.
+8. Check the built UI against a copy of the operator's database, fix what that
+   found, and record the results.
 
 ## Review and validation
 
-To be recorded after implementation.
+Each task had an independent review. Corrections included sharing the bin value
+function between quantiles and tail bins, starting the exact-sample scan at the
+requested window start so hover never lists samples outside the window,
+cleaning float noise from the seam on the client (a 0.3 ms LAN seam otherwise
+duplicated a body tick), thinning sky ticks to labels at least 12 px from the
+seam and from each other, and drawing lane numerals after the full-loss hatch,
+on a plate, without leaving their lane.
+
+The check against a copy of the operator's database found three defects, all
+fixed:
+
+- Exact `worst` and `misses` reached only buckets whose width was a whole number
+  of milliseconds. Drag-zoom requests 900 points over an arbitrary span, so its
+  buckets almost never received hover samples. Buckets are now matched on the
+  same millisecond key on both sides, with a regression test.
+- At 6h, the "5.1 s" label backdrop covered the lone 4,115 ms ember one slot to
+  its right, which was the reply from the original complaint, and that ember's
+  own label was dropped as a collision. Labels now try the right side and then
+  the left, and refuse to cover another bucket's ember core or tail grain.
+- Each ember drew its keyline and then its trail, so later keylines dimmed the
+  trails and glow already drawn in the same bucket. Stacked 4–5 s trails
+  measured 55–65% of the mockup's brightness. All keylines are now drawn first;
+  stacked trails measure within about 10% of the mockup.
+
+No size, color, or alpha constant was tuned. With the label fixed, the lone 4 s
+reply is uncovered and labelled at 6h, and lone 1–2.5 s embers match the
+approved mockup side by side.
+
+Validation passed:
+
+- The full Go test suite, the storage and API race tests, TypeScript checking,
+  the frontend asset build, the extended browser smoke workflow, and the binary
+  build. The smoke now requires both gateway embers to be labelled.
+- A copy of the operator's database served by the built binary on loopback
+  inside an unprivileged user and network namespace, so no probes left the
+  host, viewed in headless Chrome at 1840 × 1400. Preset views pinned the
+  browser clock to the end of the data (16:45 MDT, 2026-10-20).
+  - JacksTailscale 6h preset (4,320 pings): sky above a 200 ms seam with 500,
+    1k, 2k, and 5k ticks. All 14 replies over 1 s are embers in their nine
+    buckets (12:25, 12:45, 12:50, 15:20, 15:55, 16:10, 16:25, 16:30, 16:40),
+    labelled 5.1 s, 4.1 s, and 2.5 s. The deadline lane has 14 numerals summing
+    to 28 (14 late plus 14 unanswered) and the no-reply lane 11 summing to 14.
+    Hovering 12:50 lists 12:52:52 at 4.1 s, late.
+  - JacksTailscale 24h preset: sky above a 150 ms seam, labelled 13 s, 5.0 s,
+    and 5.1 s; both lanes' numerals match the mockup exactly (64 and 36).
+  - The same 6h and 24h spans as fixed windows (900 points): the same embers
+    and labels; lanes keep the 3 px floor without numerals.
+  - A drag-zoom from 16:34:07 to 16:44:56 (about one ping per bucket): an
+    800 ms seam, the 2.5 s reply as a labelled ember among single-reply smoke,
+    and its exact time in hover.
+  - Cloudflare 24h: no sky, a linear 0–30 ms axis, and 23 ms tail grains.
+  - fw1-internal 24h: sky above a 3 ms seam with the 48 ms ember labelled.
+
+Known limitations: in a drag-zoom that starts on an event, the first slots'
+lane bars sit under the DEADLINE and NO REPLY name plates and the first ember
+is half-clipped at the plot edge; the approved mockup and the pre-existing lane
+labels behave the same way. In dense windows a label that would cover nearby
+tail grains is skipped, so the fw1-internal 24h fixed window labels two of its
+three worst buckets and the 24h preset drops two `×n` tags near the seam; hover
+still shows the values. The "LOG SCALE ABOVE" caption sits beneath sky grains
+on busy charts. The experiment still needs normal operator use to judge whether
+rare outliers are now a little more obvious without competing with the smoke.
