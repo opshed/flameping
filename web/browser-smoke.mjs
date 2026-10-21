@@ -386,6 +386,10 @@ const automation = `<script>
     const hover = new MouseEvent("mousemove", {bubbles:true, clientX:box.left+Math.max(40,box.width*.55), clientY:box.top+Math.max(10,box.height/2)});
     over.dispatchEvent(hover);
     await until(() => [p99,max,late].every(row => row.querySelector(".u-value")?.textContent !== "--"));
+    const noReplyRow = flameRows().find(row => row.querySelector(".u-label")?.textContent === "no reply");
+    const deadlineRow = flameRows().find(row => row.querySelector(".u-label")?.textContent === "deadline miss");
+    if (!(Number(document.querySelector("#flame").dataset.laneNumerals) > 0)) throw new Error("loss lanes drew no count numerals: " + document.querySelector("#flame").dataset.laneNumerals);
+    for (const row of [noReplyRow, deadlineRow]) if (!/^[0-9]+ of [0-9]+ [(][0-9]+[.][0-9]%[)]$/.test(row?.querySelector(".u-value")?.textContent ?? "")) throw new Error("loss legend value is not a count: " + row?.querySelector(".u-value")?.textContent);
     p99.querySelector("th").click();
     document.body.dataset.smokeStage = "interface overview";
     const interfaceRoot=()=>document.querySelector("#interface-history");

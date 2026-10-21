@@ -52,6 +52,12 @@ const flameSeriesIndex={mean:1,p50:2,p95:3,min:4,p99:5,max:6,deadline:7,noReply:
 const noPath=()=>null;
 const msValue=(_u:uPlot,value:number)=>Number.isFinite(value)?`${value.toFixed(2)} ms`:"—";
 const pctValue=(_u:uPlot,value:number)=>Number.isFinite(value)?`${value.toFixed(2)}%`:"—";
+// Loss-lane legend values read as "3 of 60 (5.0%)"; the count is late+unanswered for the deadline lane and unanswered for no reply, over pings sent.
+const laneCount=(kind:"deadline"|"noReply")=>(_u:uPlot,value:number|null,_seriesIdx:number,idx:number|null|undefined)=>{
+  const point=idx==null?undefined:flameState.points[idx];
+  if(!point||!point.sent||value==null||!Number.isFinite(value))return"—";
+  return`${kind==="deadline"?point.late+point.unanswered:point.unanswered} of ${point.sent} (${value.toFixed(1)}%)`;
+};
 
 function flameData(points:Point[]):uPlot.AlignedData {
   const fields:(keyof Point)[]=["avg_ms","p50_ms","p95_ms","min_ms","p99_ms","max_ms","deadline_miss_pct","no_reply_pct","late_pct","send_error_pct","gap_pct","partial_marker"];
@@ -138,17 +144,26 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
     }
     ctx.globalCompositeOperation="source-over";
 
-    const fillLane=(left:number,slotRight:number,top:number,value:number,color:string)=>{
+    // AIDEV-NOTE: lane bars scale by sqrt(pct) with a 3 css px floor so one lost ping is visible at every preset; numerals (the literal ping count) need a slot >= 13 css px.
+    // dataset.laneNumerals counts the numerals actually drawn.
+    let numerals=0;
+    const numeralFont=`${9*ratio}px ui-sans-serif,system-ui,sans-serif`,numeralHeight=10*ratio;
+    const fillLane=(left:number,slotRight:number,top:number,value:number,count:number,color:string)=>{
       if(value<=0||slotRight<=left)return;
       const innerHeight=laneHeight-2*ratio;
-      const height=Math.max(ratio,innerHeight*value/100);
-      ctx.fillStyle=color;ctx.fillRect(left+.35*ratio,top+laneHeight-ratio-height,Math.max(ratio,slotRight-left-.7*ratio),height);
+      const height=Math.min(innerHeight,Math.max(3*ratio,innerHeight*Math.sqrt(value/100)));
+      const barTop=top+laneHeight-ratio-height;
+      ctx.fillStyle=color;ctx.fillRect(left+.35*ratio,barTop,Math.max(ratio,slotRight-left-.7*ratio),height);
+      if(count<=0||slotRight-left<13*ratio)return;
+      const inside=height>=numeralHeight;
+      ctx.save();ctx.font=numeralFont;ctx.textAlign="center";ctx.textBaseline=inside?"middle":"bottom";ctx.fillStyle=inside?"#1a0a07":"#f1d9cf";
+      ctx.fillText(String(count),(left+slotRight)/2,inside?barTop+height/2:barTop-ratio);ctx.restore();numerals++;
     };
     for(let index=0;index<points.length;index++){
       const point=points[index],[left,slotRight]=slots[index];
       const deadline=clampPct(point.deadline_miss_pct),noReply=clampPct(point.no_reply_pct);
-      if(visible(u,flameSeriesIndex.deadline))fillLane(left,slotRight,deadlineTop,deadline,"rgba(244,163,64,.82)");
-      if(visible(u,flameSeriesIndex.noReply))fillLane(left,slotRight,noReplyTop,noReply,noReply>=99.5?"#ee4937":"rgba(238,73,55,.86)");
+      if(visible(u,flameSeriesIndex.deadline))fillLane(left,slotRight,deadlineTop,deadline,point.late+point.unanswered,"#f4a340");
+      if(visible(u,flameSeriesIndex.noReply))fillLane(left,slotRight,noReplyTop,noReply,point.unanswered,"#ee4937");
       if(noReply>=99.5&&visible(u,flameSeriesIndex.noReply)&&slotRight>left){
         ctx.save();ctx.beginPath();ctx.rect(left,noReplyTop,slotRight-left,laneHeight);ctx.clip();ctx.strokeStyle="rgba(70,12,10,.72)";ctx.lineWidth=ratio;
         for(let x=left-laneHeight;x<slotRight+laneHeight;x+=5*ratio){ctx.beginPath();ctx.moveTo(x,noReplyTop+laneHeight);ctx.lineTo(x+laneHeight,noReplyTop);ctx.stroke()}
@@ -166,6 +181,7 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
       }
     }
 
+    ctx.font=noteFont;ctx.textAlign="right";ctx.textBaseline="middle";ctx.fillStyle="rgba(150,167,176,.8)";ctx.fillText("√ scale · min 3 px · numerals = pings",right-4*ratio,railTop+localHeight*.52);
     ctx.font=`${9*ratio}px ui-sans-serif,system-ui,sans-serif`;ctx.textAlign="left";ctx.textBaseline="middle";
     for(const[label,top,color]of[["DEADLINE",deadlineTop,"#dca052"],["NO REPLY",noReplyTop,"#db6a5d"]] as [string,number,string][]){
       const width=54*ratio;ctx.fillStyle="rgba(6,11,14,.82)";ctx.fillRect(bbox.left+2*ratio,top+2*ratio,width,laneHeight-4*ratio);ctx.fillStyle=color;ctx.fillText(label,bbox.left+6*ratio,top+laneHeight/2);
@@ -186,6 +202,7 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
     host.dataset.sky=layout.sky?"on":"off";host.dataset.seam=String(layout.seam);host.dataset.skyTicks=skyLabels.join(" ");
     host.dataset.flameRendered=points.some(point=>point.distribution_ms?.length)?"distribution":"loss-only";
     host.dataset.lossRail=points.some(point=>point.no_reply_pct>=99.5&&point.rtt_count===0)?"full-no-rtt":"rendered";
+    host.dataset.laneNumerals=String(numerals);
     host.dataset.localGaps=points.some(point=>point.send_errors>0||point.scheduler_missed>0)?"rendered":"none";
   }],
   // AIDEV-NOTE: embers, tail grains, and their labels draw in the draw hook, after the grid, seam, deadline, and series lines, so no line can hide a rare slow
@@ -228,8 +245,8 @@ function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:nu
     {label:"best",stroke:"#ffbf69",width:0,paths:noPath,points:{show:true,size:4,width:1,stroke:"#ffbf69",fill:"#101a20"},value:msValue},
     {label:"p99",class:"hover-only",stroke:"#f26a3d",auto:false,paths:noPath,points:{show:false},value:msValue},
     {label:"max",class:"hover-only",stroke:"#d54b35",auto:false,paths:noPath,points:{show:false},value:msValue},
-    {label:"deadline miss",scale:"loss",stroke:"#f4a340",auto:false,paths:noPath,points:{show:false},value:pctValue},
-    {label:"no reply",scale:"loss",stroke:"#ee4937",auto:false,paths:noPath,points:{show:false},value:pctValue},
+    {label:"deadline miss",scale:"loss",stroke:"#f4a340",auto:false,paths:noPath,points:{show:false},value:laneCount("deadline")},
+    {label:"no reply",scale:"loss",stroke:"#ee4937",auto:false,paths:noPath,points:{show:false},value:laneCount("noReply")},
     {label:"late reply",class:"tooltip-only",scale:"loss",stroke:"#ffc35c",auto:false,paths:noPath,points:{show:false},value:pctValue},
     {label:"local send error",scale:"loss",stroke:"#aab5ba",auto:false,paths:noPath,points:{show:false},value:pctValue},
     {label:"scheduler gap",scale:"loss",stroke:"#82949f",auto:false,paths:noPath,points:{show:false},value:pctValue},
