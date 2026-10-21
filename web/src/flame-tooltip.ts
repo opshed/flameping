@@ -20,11 +20,12 @@ export function bucketTooltip(point:Point,bucketMs:number):string{
 }
 
 // Tooltip element lives inside the chart root; styling is class-based because CSP forbids inline style attributes (element.style.* property writes are allowed).
+// It is aria-hidden rather than a live region: the legend row already carries the same data, and a live region would announce every cursor move.
 export function flameTooltipPlugin(points:()=>Point[],bucketMs:()=>number):uPlot.Plugin{
   let tip:HTMLDivElement;
   const hide=()=>{tip.hidden=true};
   return{hooks:{
-    init:[u=>{tip=document.createElement("div");tip.id="flame-tooltip";tip.className="flame-tooltip";tip.hidden=true;tip.setAttribute("role","status");u.root.append(tip);u.over.addEventListener("mouseleave",hide)}],
+    init:[u=>{tip=document.createElement("div");tip.id="flame-tooltip";tip.className="flame-tooltip";tip.hidden=true;tip.setAttribute("aria-hidden","true");u.root.append(tip);u.over.addEventListener("mouseleave",hide)}],
     setCursor:[u=>{
       const idx=u.cursor.idx,point=idx==null?undefined:points()[idx],left=u.cursor.left??-1;
       if(!point||left<0){hide();return}

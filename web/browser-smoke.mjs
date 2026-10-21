@@ -223,12 +223,12 @@ const automation = `<script>
     for(const entry of ["spark","late spark","seam","deadline"])assert(keyText.includes(entry),"chart key is missing "+entry);
     assert(document.querySelector("#flame").getAttribute("aria-label").includes("embers"),"flame aria-label does not mention embers");
     {const over0=flameAxis.querySelector(".u-over"),tip=document.querySelector("#flame-tooltip");
-      assert(tip,"tooltip element is missing: "+[...flameAxis.querySelectorAll("*")].map(e=>e.className).filter(Boolean).slice(0,40).join("/")+" n="+document.querySelectorAll("#flame").length);
+      assert(tip,"tooltip element is missing");
+      assert(!tip.hasAttribute("role")&&tip.getAttribute("aria-hidden")==="true","tooltip must be aria-hidden, not a live region: the legend row carries the same data");
       await until(()=>over0.getBoundingClientRect().width>0,"flame plot has a layout box");const b0=over0.getBoundingClientRect();
       over0.dispatchEvent(new MouseEvent("mouseenter"));
       over0.dispatchEvent(new MouseEvent("mousemove",{bubbles:true,clientX:b0.left+b0.width*9/20,clientY:b0.top+b0.height/3}));
-      await new Promise(r=>setTimeout(r,300));const dbg=JSON.stringify({b0,ow:over0.offsetWidth,txt:tip.textContent.slice(0,20),l:tip.style.left});
-      await until(()=>!tip.hidden&&tip.textContent.includes("4.1 s"),"gateway bucket tooltip hidden="+tip.hidden+" text="+tip.textContent+dbg);
+      await until(()=>!tip.hidden&&tip.textContent.includes("4.1 s"),"gateway bucket tooltip");
       const worstTime=new Date(Number(flameAxis.dataset.from)+(Number(flameAxis.dataset.to)-Number(flameAxis.dataset.from))/20*9+Math.min(4000,(Number(flameAxis.dataset.to)-Number(flameAxis.dataset.from))/40)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
       assert(tip.textContent.includes("late")&&tip.textContent.includes(worstTime),"tooltip lacks the worst reply time/late mark: "+tip.textContent+" want "+worstTime);
       const tb=tip.getBoundingClientRect(),rb=flameAxis.getBoundingClientRect();
