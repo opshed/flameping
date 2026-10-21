@@ -7,18 +7,18 @@ import {InterfaceHistoryView} from "./interface-history";
 import {obsessLabel,renderObsessStatus,type ObsessStatus} from "./obsess-status";
 import {OverviewView,detailLink,type MonitorStatus} from "./overview";
 import {flameBwd,flameFwd,flameSplits,formatMs,formatTick,skyLayout,type FlameWindow,type Point,type SkyLayout} from "./flame-scale";
-import {classifyTail,drawEmbers} from "./flame-embers";
+import {classifyTail,drawEmbers,type Box} from "./flame-embers";
 import {flameTooltipPlugin} from "./flame-tooltip";
 
 type Target={id:string,name:string,address:string,endpoint?:string,state:string,last_rtt_ms?:number,obsess?:ObsessStatus};
 type RangePreset={duration:number,maxPoints:number};
-type FlameState={points:Point[],layout:SkyLayout,window?:FlameWindow,bucketMs:number};
+type FlameState={points:Point[],layout:SkyLayout,window?:FlameWindow,bucketMs:number,captions:Box[]};
 const $=(s:string)=>document.querySelector(s) as HTMLElement;
 let target:string|null=null,range="6h",targets:Target[]=[];
 let flame:uPlot|null=null;
 let page:"overview"|"details"="overview",refreshRequest=0;
 let monitorStatus:MonitorStatus|null=null;
-const flameState:FlameState={points:[],layout:skyLayout(undefined,0),bucketMs:0};
+const flameState:FlameState={points:[],layout:skyLayout(undefined,0),bucketMs:0,captions:[]};
 let viewport:{from:number,to:number}|null=null,seriesRequest=0;
 let routeSelection:Bounds|null=null,interfaceSelection:Bounds|null=null,flameContext:string|null=null;
 const routeView=new RouteHistoryView($("#route-history"),bounds=>drillDown(bounds.from,bounds.to),bounds=>{routeSelection=bounds;flame?.redraw()});
@@ -93,7 +93,7 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
   const visible=(u:uPlot,index:number)=>u.series[index]?.show!==false;
   const clampPct=(value:number|undefined)=>Math.max(0,Math.min(100,value??0));
   return{hooks:{drawAxes:[u=>{
-    const points=state.points;
+    const points=state.points;state.captions=[];
     if(points.length===0)return;
     const {ctx,bbox}=u,ratio=uPlot.pxRatio;
     const right=bbox.left+bbox.width,bottom=bbox.top+bbox.height;
@@ -115,15 +115,20 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
 
     const layout=state.layout,seamY=u.valToPos(layout.seam,"y",true),noteFont=`${9*ratio}px ui-sans-serif,system-ui,sans-serif`;
     const dashedRule=(y:number,color:string,dash:number[])=>{ctx.save();ctx.setLineDash(dash.map(part=>part*ratio));ctx.strokeStyle=color;ctx.lineWidth=ratio;ctx.beginPath();ctx.moveTo(bbox.left,y);ctx.lineTo(right,y);ctx.stroke();ctx.restore()};
+    // Each caption's box (2 px margin) seeds the ember label collision set, so a value label flips or is skipped rather than cover a caption.
+    const caption=(text:string,x:number,y:number,align:"left"|"right",color:string)=>{
+      ctx.font=noteFont;ctx.textAlign=align;ctx.textBaseline="bottom";ctx.fillStyle=color;ctx.fillText(text,x,y);
+      const width=ctx.measureText(text).width;state.captions.push([(align==="right"?x-width:x)-2*ratio,y-11*ratio,width+4*ratio,13*ratio]);
+    };
     if(layout.sky){
       ctx.fillStyle="rgba(255,120,40,.035)";ctx.fillRect(bbox.left,bbox.top,bbox.width,seamY-bbox.top);
       dashedRule(seamY,"rgba(138,160,173,.55)",[4,4]);
-      ctx.font=noteFont;ctx.textAlign="right";ctx.textBaseline="bottom";ctx.fillStyle="#c99a6a";ctx.fillText(`LOG SCALE ABOVE ${formatMs(layout.seam)} ↑`,right-4*ratio,seamY-2*ratio);
+      caption(`LOG SCALE ABOVE ${formatMs(layout.seam)} ↑`,right-4*ratio,seamY-2*ratio,"right","#c99a6a");
     }
     const timeout=Math.max(0,...points.map(point=>point.timeout_max_ms??0));
     if(timeout>0&&timeout<layout.top){
       const y=u.valToPos(timeout,"y",true);dashedRule(y,"rgba(255,138,106,.55)",[2,4]);
-      ctx.font=noteFont;ctx.textAlign="left";ctx.textBaseline="bottom";ctx.fillStyle="#ff9d7a";ctx.fillText(`DEADLINE ${formatMs(timeout)} · late above`,bbox.left+6*ratio,y-2*ratio);
+      caption(`DEADLINE ${formatMs(timeout)} · late above`,bbox.left+6*ratio,y-2*ratio,"left","#ff9d7a");
     }
 
     ctx.globalCompositeOperation="lighter";
@@ -145,8 +150,8 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
     }
     ctx.globalCompositeOperation="source-over";
 
-    // AIDEV-NOTE: lane bars scale by sqrt(pct) with a 3 css px floor so one lost ping is visible at every preset; numerals (the literal ping count) need a slot >= 13 css px.
-    // dataset.laneNumerals counts the numerals actually drawn.
+    // AIDEV-NOTE: lane bars scale by sqrt(pct) with a 3 css px floor so one lost ping is visible at every preset; numerals (the literal ping count) need a slot >= 13 css px
+    // that also fits the text plus 1 css px each side, so "1440" never spills into the next bucket. dataset.laneNumerals counts the numerals actually drawn.
     // Numerals are queued and drawn after every bar and the full-loss hatch, so no hatch line crosses one.
     const pending:{text:string,x:number,y:number,inside:boolean,plate:boolean}[]=[];
     const numeralFont=`${9*ratio}px ui-sans-serif,system-ui,sans-serif`,numeralHeight=10*ratio;
@@ -156,12 +161,14 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
       const height=Math.min(innerHeight,Math.max(3*ratio,innerHeight*Math.sqrt(value/100)));
       const barTop=top+laneHeight-ratio-height;
       ctx.fillStyle=color;ctx.fillRect(left+.35*ratio,barTop,Math.max(ratio,slotRight-left-.7*ratio),height);
-      if(count<=0||slotRight-left<13*ratio)return;
+      const text=String(count);
+      if(count<=0||slotRight-left<13*ratio||ctx.measureText(text).width+2*ratio>slotRight-left)return;
       const inside=height>=numeralHeight;
       // A short bar puts the numeral above it; skip when that would poke out of the lane's top edge.
       if(!inside&&barTop-top<numeralHeight+ratio)return;
-      pending.push({text:String(count),x:(left+slotRight)/2,y:inside?barTop+height/2:barTop-ratio,inside,plate:fullLoss});
+      pending.push({text,x:(left+slotRight)/2,y:inside?barTop+height/2:barTop-ratio,inside,plate:fullLoss});
     };
+    ctx.font=numeralFont; // fillLane measures numerals against their slot
     for(let index=0;index<points.length;index++){
       const point=points[index],[left,slotRight]=slots[index];
       const deadline=clampPct(point.deadline_miss_pct),noReply=clampPct(point.no_reply_pct);
@@ -219,7 +226,7 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
   // ping. dataset.embers counts flaming (non-mild) embers and dataset.lateEmbers the late ones among them; mild sky values are drawn and counted as tail grains.
   draw:[u=>{
     const points=state.points,result=classifyTail(points,state.layout),host=u.root.parentElement??u.root;
-    host.dataset.emberLabels=String(points.length?drawEmbers(u,points,flameSlots(u,points).slots,result,state.layout):0);
+    host.dataset.emberLabels=String(points.length?drawEmbers(u,points,flameSlots(u,points).slots,result,state.layout,state.captions):0);
     const flames=result.embers.filter(ember=>!ember.mild);host.dataset.embers=String(flames.length);host.dataset.lateEmbers=String(flames.filter(ember=>ember.late).length);host.dataset.tailGrains=String(result.grains.length);
   }]}};
 }

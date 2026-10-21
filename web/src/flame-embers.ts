@@ -3,7 +3,7 @@ import {formatMs,type Point,type SkyLayout} from "./flame-scale";
 
 export type Ember={index:number,value:number,count:number,late:boolean,severity:number,mild:boolean};
 export type TailGrain={index:number,value:number,late:boolean,alpha:number};
-type Box=[number,number,number,number];
+export type Box=[number,number,number,number];
 const overlaps=(a:Box,b:Box)=>a[0]<b[0]+b[2]&&b[0]<a[0]+a[2]&&a[1]<b[1]+b[3]&&b[1]<a[1]+a[3];
 
 const keyline="rgba(6,11,14,.85)";
@@ -27,9 +27,9 @@ export function classifyTail(points:Point[],layout:SkyLayout):{embers:Ember[],gr
   return{embers,grains};
 }
 
-// Draws tail grains, then trails, then glowing cores, then labels; every mark sits on a dark keyline underlay so a line beneath it cannot merge with it.
-// Pixel constants are CSS px scaled by uPlot.pxRatio. Returns the number of labels drawn.
-export function drawEmbers(u:uPlot,points:Point[],slots:readonly (readonly [number,number])[],result:ReturnType<typeof classifyTail>,layout:SkyLayout):number{
+// Draws trails, then tail grains, then glowing cores, then labels; every mark sits on a dark keyline underlay so a line beneath it cannot merge with it.
+// `obstacles` are boxes no label may cover (the seam and deadline captions). Pixel constants are CSS px scaled by uPlot.pxRatio. Returns the number of labels drawn.
+export function drawEmbers(u:uPlot,points:Point[],slots:readonly (readonly [number,number])[],result:ReturnType<typeof classifyTail>,layout:SkyLayout,obstacles:readonly Box[]=[]):number{
   const{ctx,bbox}=u,ratio=uPlot.pxRatio,right=bbox.left+bbox.width,floor=u.valToPos(0,"y",true),k=.75*ratio;
   const x=(index:number)=>u.valToPos(points[index].time_ms/1000,"x",true),y=(value:number)=>u.valToPos(value,"y",true),slot=(index:number)=>slots[index][1]-slots[index][0];
   // The worst ember usually sits a few px under the top (top = niceCeil(1.15 × max)), so the clip opens upward into uPlot's empty top padding
@@ -37,17 +37,12 @@ export function drawEmbers(u:uPlot,points:Point[],slots:readonly (readonly [numb
   ctx.save();ctx.beginPath();ctx.rect(bbox.left,0,bbox.width,bbox.top+bbox.height);ctx.clip();
   // Every drawn core and tail grain is recorded with its keyline box so a label backdrop can avoid covering it.
   const marks:{index:number,box:Box}[]=[];
-  for(const grain of result.grains){
-    const cy=y(grain.value),width=slot(grain.index);if(width<=0||cy<bbox.top||cy>floor)continue;
-    const w=Math.max(ratio,Math.min(7*ratio,width*.78)),h=4*ratio,left=x(grain.index)-w/2;
-    marks.push({index:grain.index,box:[left-k,cy-h/2-k,w+2*k,h+2*k]});
-    ctx.fillStyle=keyline;ctx.fillRect(left-k,cy-h/2-k,w+2*k,h+2*k);ctx.fillStyle=`rgba(${grain.late?"255,120,90":"255,190,110"},${grain.alpha.toFixed(3)})`;ctx.fillRect(left,cy-h/2,w,h);
-  }
   // Buckets whose slot is clamped away (centre outside the plot) draw nothing and cannot take one of the three value labels.
   const onPlot=result.embers.filter(ember=>slot(ember.index)>0),flames=onPlot.filter(ember=>!ember.mild);
   // A trail tapers from the top of its bucket's smoke (p95, or the seam when p95 is above it) to the ember and fades in toward the tip.
   // AIDEV-NOTE: keylines go down in their own pass before any coloured trail, and core keylines before any core. Drawn per ember, a later ember's
   // keyline darkened the trails and glow already drawn in the same bucket, so stacked 4–5 s trails read about half as bright as the approved mockup.
+  // Tail grains (keyline and fill) go after every trail and before any core for the same reason: drawn first, a trail or its keyline dimmed the grains in its bucket.
   const trail=(ember:Ember,rgb:string,a:number,pad:number)=>{
     const point=points[ember.index],cx=x(ember.index),tip=y(ember.value),base=y(Math.min(point.p95_ms??layout.seam,layout.seam)),mid=(base+tip)/2;
     const width=Math.min(slot(ember.index)*.55,(trailWidth(ember.count)+1.6*ember.severity)*ratio)+2*pad,half=.6*ratio+pad;
@@ -56,6 +51,12 @@ export function drawEmbers(u:uPlot,points:Point[],slots:readonly (readonly [numb
   };
   for(const ember of flames)trail(ember,"6,11,14",.85,k);
   for(const ember of flames)trail(ember,ember.late?"255,90,46":"255,157,66",.2+.7*ember.severity,0);
+  for(const grain of result.grains){
+    const cy=y(grain.value),width=slot(grain.index);if(width<=0||cy<bbox.top||cy>floor)continue;
+    const w=Math.max(ratio,Math.min(7*ratio,width*.78)),h=4*ratio,left=x(grain.index)-w/2;
+    marks.push({index:grain.index,box:[left-k,cy-h/2-k,w+2*k,h+2*k]});
+    ctx.fillStyle=keyline;ctx.fillRect(left-k,cy-h/2-k,w+2*k,h+2*k);ctx.fillStyle=`rgba(${grain.late?"255,120,90":"255,190,110"},${grain.alpha.toFixed(3)})`;ctx.fillRect(left,cy-h/2,w,h);
+  }
   const cores=flames.map(ember=>{const rx=(coreRadius(ember.count)+1.1*ember.severity)*ratio;return{ember,cx:x(ember.index),cy:y(ember.value),rx,ry:rx*1.7}});
   for(const{ember,cx,cy,rx,ry}of cores){
     marks.push({index:ember.index,box:[cx-rx-k,cy-ry-k,2*(rx+k),2*(ry+k)]});
@@ -67,8 +68,9 @@ export function drawEmbers(u:uPlot,points:Point[],slots:readonly (readonly [numb
   }
   // The value goes on the highest ember of each of the three worst buckets (exact worst reply when known, else "≈" the bin value); clusters add "×n"
   // when their slot is at least 10 px. Labels sit beside the ember on a dark backdrop, right side first, else left.
-  // AIDEV-NOTE: a side is rejected when it leaves the plot, overlaps a placed label, or would cover another bucket's ember core or tail grain: at 6h
-  // the "5.1 s" backdrop otherwise hid the lone 4.1 s ember one slot to its right. A label that fits neither side is skipped; hover still has the value.
+  // AIDEV-NOTE: a side is rejected when it leaves the plot, overlaps a placed label or an obstacle (the "LOG SCALE ABOVE" and "DEADLINE" captions), or
+  // would cover another bucket's ember core or tail grain: at 6h the "5.1 s" backdrop otherwise hid the lone 4.1 s ember one slot to its right, and in a
+  // drag-zoom a "1.0 s" label sat on the deadline caption. A label that fits neither side is skipped; hover still has the value.
   const ranked=onPlot.sort((a,b)=>b.value-a.value),valued=new Set<Ember>(),buckets=new Set<number>(),placed:Box[]=[];
   for(const ember of ranked){if(ember.mild||buckets.has(ember.index))continue;buckets.add(ember.index);valued.add(ember);if(valued.size===3)break}
   ctx.font=`${9.5*ratio}px ui-sans-serif,system-ui,sans-serif`;ctx.textAlign="left";ctx.textBaseline="middle";
@@ -79,7 +81,7 @@ export function drawEmbers(u:uPlot,points:Point[],slots:readonly (readonly [numb
     if(!parts.length)continue;
     const text=parts.join(" "),width=ctx.measureText(text).width,cx=x(ember.index),cy=Math.max(bbox.top+6*ratio,y(ember.value));
     const box=[cx+6*ratio,cx-6*ratio-width].map((left):Box=>[left-2*ratio,cy-6*ratio,width+4*ratio,12*ratio]).find(box=>box[0]>=bbox.left&&box[0]+box[2]<=right
-      &&!placed.some(other=>overlaps(box,other))&&!marks.some(mark=>mark.index!==ember.index&&overlaps(box,mark.box)));
+      &&!placed.some(other=>overlaps(box,other))&&!obstacles.some(other=>overlaps(box,other))&&!marks.some(mark=>mark.index!==ember.index&&overlaps(box,mark.box)));
     if(!box)continue;
     placed.push(box);ctx.fillStyle="rgba(6,11,14,.75)";ctx.fillRect(...box);ctx.fillStyle=valued.has(ember)?"#dbe5ed":"#aebfc9";ctx.fillText(text,box[0]+2*ratio,cy);
   }
