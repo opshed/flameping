@@ -75,7 +75,7 @@ function points(from, to, target) {
       p95_ms:10.25+i*.12, p99_ms:13.5+i*.15, max_ms:19+i*.2,
       distribution_ms:distribution,
     });
-    if (spike) Object.assign(point, {max_ms:spike.ms, tail:[spike], ...(spike.n === 1 ? {worst:[{time_ms:point.time_ms+4000, rtt_ms:spike.ms, late:true}]} : {})});
+    if (spike) Object.assign(point, {max_ms:spike.ms, tail:[spike], ...(spike.n === 1 ? {worst:[{time_ms:Math.round(point.time_ms+Math.min(4000,step/2)), rtt_ms:spike.ms, late:true}]} : {})});
     if (!gateway && i === 1) Object.assign(point, {max_ms:14, tail:[{ms:14,n:1}]});
     return point;
   });
@@ -124,7 +124,7 @@ function fixtureResponse(url) {
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
     const target = path.split("/")[4];
-    return {distribution_method:"midpoint_quantiles", distribution_cap:17, window:pingWindows[target], points:points(from, to, target)};
+    return {distribution_method:"midpoint_quantiles", distribution_cap:17, window:pingWindows[target], bucket_ms:(to-from)/20, points:points(from, to, target)};
   }
   const history = path.match(/^\/api\/v1\/targets\/([^/]+)\/route-history$/);
   if (history) return routeFixture(history[1],Number(url.searchParams.get("from")),Number(url.searchParams.get("to")),Number(url.searchParams.get("max_points")));
@@ -216,6 +216,22 @@ const automation = `<script>
     const skyTicks=flameAxis.dataset.skyTicks.split(" ");
     assert(skyTicks.includes("100")&&skyTicks.includes("5k")&&!skyTicks.includes("20"),"gateway log sky ticks are not spaced logarithmically up to the 5k top: "+flameAxis.dataset.skyTicks);
     assert(flameAxis.dataset.embers==="2"&&Number(flameAxis.dataset.emberLabels)>=1,"gateway sky outliers did not draw two labelled embers: embers="+flameAxis.dataset.embers+" labels="+flameAxis.dataset.emberLabels);
+    const keyText=document.querySelector(".flame-key").textContent;
+    for(const entry of ["spark","late spark","seam","deadline"])assert(keyText.includes(entry),"chart key is missing "+entry);
+    assert(document.querySelector("#flame").getAttribute("aria-label").includes("embers"),"flame aria-label does not mention embers");
+    {const over0=flameAxis.querySelector(".u-over"),tip=document.querySelector("#flame-tooltip");
+      assert(tip,"tooltip element is missing: "+[...flameAxis.querySelectorAll("*")].map(e=>e.className).filter(Boolean).slice(0,40).join("/")+" n="+document.querySelectorAll("#flame").length);
+      await until(()=>over0.getBoundingClientRect().width>0,"flame plot has a layout box");const b0=over0.getBoundingClientRect();
+      over0.dispatchEvent(new MouseEvent("mouseenter"));
+      over0.dispatchEvent(new MouseEvent("mousemove",{bubbles:true,clientX:b0.left+b0.width*9/20,clientY:b0.top+b0.height/3}));
+      await new Promise(r=>setTimeout(r,300));const dbg=JSON.stringify({b0,ow:over0.offsetWidth,txt:tip.textContent.slice(0,20),l:tip.style.left});
+      await until(()=>!tip.hidden&&tip.textContent.includes("4.1 s"),"gateway bucket tooltip hidden="+tip.hidden+" text="+tip.textContent+dbg);
+      const worstTime=new Date(Number(flameAxis.dataset.from)+(Number(flameAxis.dataset.to)-Number(flameAxis.dataset.from))/20*9+Math.min(4000,(Number(flameAxis.dataset.to)-Number(flameAxis.dataset.from))/40)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+      assert(tip.textContent.includes("late")&&tip.textContent.includes(worstTime),"tooltip lacks the worst reply time/late mark: "+tip.textContent+" want "+worstTime);
+      const tb=tip.getBoundingClientRect(),rb=flameAxis.getBoundingClientRect();
+      assert(tb.left>=rb.left-1&&tb.right<=rb.right+1&&tb.top>=rb.top-1&&tb.bottom<=rb.bottom+1,"tooltip escapes the chart");
+      over0.dispatchEvent(new MouseEvent("mouseleave",{bubbles:false}));
+      await until(()=>tip.hidden,"tooltip hides on mouseleave");}
     await control({targets:"failure",ping:"delay"});
     document.querySelector('#targets button[data-id="backup"]').click();
     assert(document.querySelector("#title").textContent==="Backup"&&document.querySelector("#flame").dataset.flameRendered==="empty","navigation retained old target evidence while metadata failed");

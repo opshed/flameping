@@ -8,16 +8,17 @@ import {obsessLabel,renderObsessStatus,type ObsessStatus} from "./obsess-status"
 import {OverviewView,detailLink,type MonitorStatus} from "./overview";
 import {flameBwd,flameFwd,flameSplits,formatMs,formatTick,skyLayout,type FlameWindow,type Point,type SkyLayout} from "./flame-scale";
 import {classifyTail,drawEmbers} from "./flame-embers";
+import {flameTooltipPlugin} from "./flame-tooltip";
 
 type Target={id:string,name:string,address:string,endpoint?:string,state:string,last_rtt_ms?:number,obsess?:ObsessStatus};
 type RangePreset={duration:number,maxPoints:number};
-type FlameState={points:Point[],layout:SkyLayout,window?:FlameWindow};
+type FlameState={points:Point[],layout:SkyLayout,window?:FlameWindow,bucketMs:number};
 const $=(s:string)=>document.querySelector(s) as HTMLElement;
 let target:string|null=null,range="6h",targets:Target[]=[];
 let flame:uPlot|null=null;
 let page:"overview"|"details"="overview",refreshRequest=0;
 let monitorStatus:MonitorStatus|null=null;
-const flameState:FlameState={points:[],layout:skyLayout(undefined,0)};
+const flameState:FlameState={points:[],layout:skyLayout(undefined,0),bucketMs:0};
 let viewport:{from:number,to:number}|null=null,seriesRequest=0;
 let routeSelection:Bounds|null=null,interfaceSelection:Bounds|null=null,flameContext:string|null=null;
 const routeView=new RouteHistoryView($("#route-history"),bounds=>drillDown(bounds.from,bounds.to),bounds=>{routeSelection=bounds;flame?.redraw()});
@@ -235,9 +236,9 @@ function routeSelectionPlugin():uPlot.Plugin{return{hooks:{ready:[alignRoutes],s
   }
 }]}}}
 
-function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:number|undefined,flameWindow:FlameWindow|undefined,bounds:Bounds,zoom:(from:number,to:number)=>void){
+function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:number|undefined,flameWindow:FlameWindow|undefined,bounds:Bounds,zoom:(from:number,to:number)=>void,bucketMs=0){
   // The layout must change before setData: the y scale reads it at call time while uPlot re-ranges this reused instance.
-  flameState.points=points;flameState.window=flameWindow;flameState.layout=skyLayout(flameWindow,flameFallbackMax(points));
+  flameState.points=points;flameState.window=flameWindow;flameState.bucketMs=bucketMs;flameState.layout=skyLayout(flameWindow,flameFallbackMax(points));
   const root=$("#flame"),size={width:Math.max(280,root.clientWidth),height:360},data=flameData(points);
   root.dataset.distributionMethod=method??"";root.dataset.distributionCap=cap==null?"":String(cap);root.dataset.maxGrains=String(Math.max(0,...points.map(point=>point.distribution_ms?.length??0)));
   if(points.length===0){root.dataset.flameRendered="empty";root.dataset.lossRail="empty";root.dataset.localGaps="none";root.dataset.sky="off";root.dataset.seam=String(flameState.layout.seam);root.dataset.skyTicks=""}
@@ -260,7 +261,7 @@ function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:nu
     {label:"local send error",scale:"loss",stroke:"#aab5ba",auto:false,paths:noPath,points:{show:false},value:pctValue},
     {label:"scheduler gap",scale:"loss",stroke:"#82949f",auto:false,paths:noPath,points:{show:false},value:pctValue},
     {label:"partial bucket",scale:"loss",stroke:"#7f8f98",auto:false,paths:noPath,points:{show:false},value:(_u,value)=>value?"partial":"—"},
-  ],plugins:[flameSmokePlugin(flameState),routeSelectionPlugin()],hooks:{setSelect:[u=>{if(u.select.width<8)return;const from=u.posToVal(u.select.left,"x")*1000,to=u.posToVal(u.select.left+u.select.width,"x")*1000;queueMicrotask(()=>zoom(from,to))}]}},data,root);
+  ],plugins:[flameSmokePlugin(flameState),flameTooltipPlugin(()=>flameState.points,()=>flameState.bucketMs),routeSelectionPlugin()],hooks:{setSelect:[u=>{if(u.select.width<8)return;const from=u.posToVal(u.select.left,"x")*1000,to=u.posToVal(u.select.left+u.select.width,"x")*1000;queueMicrotask(()=>zoom(from,to))}]}},data,root);
 }
 
 function seriesBounds(){if(viewport)return viewport;const to=Date.now();return{to,from:to-ranges[range].duration}}
@@ -285,7 +286,7 @@ async function loadSeries(){
     if(id!==seriesRequest||selected!==target)return;
     const p:Point[]=s.points??[];
     p.forEach(x=>{x.rtt_count??=0;x.late_pct=x.sent?100*x.late/x.sent:0;x.send_error_pct=x.attempted?100*x.send_errors/x.attempted:0;x.gap_pct=x.scheduled?100*x.scheduler_missed/x.scheduled:0;x.partial_marker=x.partial?1:undefined});
-    flame=flameGraph(flame,p,s.distribution_method,s.distribution_cap,s.window,bounds,drillDown);
+    flame=flameGraph(flame,p,s.distribution_method,s.distribution_cap,s.window,bounds,drillDown,Number(s.bucket_ms)||0);
     const last=p.at(-1)||{} as Point,sent=p.reduce((a,x)=>a+x.sent,0),miss=p.reduce((a,x)=>a+x.late+x.unanswered,0),no=p.reduce((a,x)=>a+x.unanswered,0);
     $("#stats").innerHTML=stat("Latest mean",last.avg_ms==null?"—":last.avg_ms.toFixed(2)+" ms")+stat("Deadline miss",sent?(100*miss/sent).toFixed(2)+"%":"—")+stat("No reply",sent?(100*no/sent).toFixed(2)+"%":"—")+stat("Packets sent",sent.toLocaleString());
     $("#flame-status").hidden=true;
