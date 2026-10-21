@@ -30,12 +30,22 @@ func singleBucket(a pingAggregate) map[int64]*queryAggregate {
 }
 
 func TestNiceCeil(t *testing.T) {
+	// Exact equality: the seam is serialized as seam_ms, so float noise such as
+	// 3 × 0.1 = 0.30000000000000004 must not reach the JSON.
 	for _, tc := range []struct{ in, want float64 }{
 		{168, 200}, {2.6, 3}, {0.26, 0.3}, {11, 12}, {0.9, 1}, {1000, 1000}, {1001, 1200}, {8.1, 10},
+		{0.011, 0.012}, {0.0026, 0.003}, {0.7, 0.8}, {0.00055, 0.0006}, {0.13, 0.15}, {0.081, 0.1},
 	} {
-		if got := niceCeil(tc.in); math.Abs(got-tc.want) > 1e-9*tc.want {
-			t.Errorf("niceCeil(%v)=%v, want %v", tc.in, got, tc.want)
+		if got := niceCeil(tc.in); got != tc.want {
+			t.Errorf("niceCeil(%v)=%v, want exactly %v", tc.in, got, tc.want)
 		}
+	}
+	data, err := json.Marshal(PingWindow{SeamMS: niceCeil(0.26)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"seam_ms":0.3}`) {
+		t.Fatalf("json %s, want seam_ms 0.3", data)
 	}
 }
 

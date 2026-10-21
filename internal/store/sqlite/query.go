@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/opshed/flameping/internal/histogram"
@@ -700,7 +701,8 @@ func mergeQueryAggregate(result map[int64]*queryAggregate, key int64, source pin
 }
 
 // niceCeil rounds x up to the next value in {1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6,
-// 8} x 10^k.
+// 8} x 10^k. The result is rounded to 12 significant digits (as the client's
+// clean() does) so seam_ms serializes as 0.3, not 3 x 0.1 = 0.30000000000000004.
 func niceCeil(x float64) float64 {
 	if x <= 0 || math.IsInf(x, 0) || math.IsNaN(x) {
 		return x
@@ -709,10 +711,19 @@ func niceCeil(x float64) float64 {
 	for _, step := range [...]float64{1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8} {
 		// Relative slack absorbs float error so exact steps (1000) stay put.
 		if x <= step*scale*(1+1e-9) {
-			return step * scale
+			return cleanFloat(step * scale)
 		}
 	}
-	return 10 * scale
+	return cleanFloat(10 * scale)
+}
+
+// cleanFloat rounds x to 12 significant digits.
+func cleanFloat(x float64) float64 {
+	clean, err := strconv.ParseFloat(strconv.FormatFloat(x, 'g', 12, 64), 64)
+	if err != nil {
+		return x
+	}
+	return clean
 }
 
 // pingWindow pools every bucket's histogram into window-wide quantiles and
