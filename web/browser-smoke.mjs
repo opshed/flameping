@@ -46,21 +46,24 @@ const fixtures = {
   ],
 };
 
-function points(from, to) {
-  const step = (to - from) / 20;
+// Gateway carries two slow outliers above its 20 ms seam (one lone 4,115 ms reply, three 4,300 ms replies), so its axis gains a log sky; backup stays linear.
+const pingWindows = {gateway:{rtt_count:1200,p50_ms:3,p95_ms:9,p99_ms:15,max_ms:4300,seam_ms:20}, backup:{rtt_count:1200,p50_ms:3,p95_ms:9,p99_ms:13,max_ms:15,seam_ms:20}};
+function points(from, to, target) {
+  const step = (to - from) / 20, gateway = target === "gateway";
   return Array.from({length:21}, (_, i) => {
     const noReplyOnly = i === 3;
     const sendErrors = i === 7 ? 4 : 0;
     const schedulerMissed = i === 12 ? 8 : 0;
     const attempted = 60;
     const sent = attempted - sendErrors;
-    const late = noReplyOnly ? 0 : i % 7 === 0 ? 2 : 0;
+    const spike = gateway ? {9:{ms:4115,n:1},16:{ms:4300,n:3}}[i] : undefined;
+    const late = noReplyOnly ? 0 : Math.max(i % 7 === 0 ? 2 : 0, spike?.n ?? 0);
     const unanswered = noReplyOnly ? sent : i % 11 === 0 ? 1 : 0;
     const distribution = noReplyOnly ? undefined : Array.from({length:17}, (_, grain) => grain < 11 ? 1.55+i*.08+grain*.055 : 8.4+i*.12+(grain-11)*.42);
     const point = {
       time_ms:Math.round(from+step*i), scheduled:attempted+schedulerMissed, attempted, sent,
       late, unanswered, send_errors:sendErrors, scheduler_missed:schedulerMissed,
-      rtt_count:noReplyOnly?0:sent-unanswered, timeout_max_ms:5000,
+      rtt_count:noReplyOnly?0:sent-unanswered, timeout_max_ms:gateway?1000:5000,
       deadline_miss_pct:sent?100*(late+unanswered)/sent:0,
       no_reply_pct:sent?100*unanswered/sent:0,
       partial:i===20,
@@ -70,6 +73,7 @@ function points(from, to) {
       p95_ms:10.25+i*.12, p99_ms:13.5+i*.15, max_ms:19+i*.2,
       distribution_ms:distribution,
     });
+    if (spike) Object.assign(point, {max_ms:spike.ms, tail:[spike], ...(spike.n === 1 ? {worst:[{time_ms:point.time_ms+4000, rtt_ms:spike.ms, late:true}]} : {})});
     return point;
   });
 }
@@ -116,7 +120,8 @@ function fixtureResponse(url) {
   if (/^\/api\/v1\/targets\/[^/]+\/ping$/.test(path)) {
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
-    return {distribution_method:"midpoint_quantiles", distribution_cap:17, points:points(from, to)};
+    const target = path.split("/")[4];
+    return {distribution_method:"midpoint_quantiles", distribution_cap:17, window:pingWindows[target], points:points(from, to, target)};
   }
   const history = path.match(/^\/api\/v1\/targets\/([^/]+)\/route-history$/);
   if (history) return routeFixture(history[1],Number(url.searchParams.get("from")),Number(url.searchParams.get("to")),Number(url.searchParams.get("max_points")));
@@ -203,10 +208,15 @@ const automation = `<script>
     assert(document.querySelector("#overview-window").value==="15m","back navigation lost overview selection");
     document.querySelector('[data-overview-target="gateway"]').click();
     await until(()=>document.querySelector("#title").textContent==="Gateway"&&document.querySelector("#flame").dataset.flameRendered==="distribution","return to gateway detail");
+    const flameAxis=document.querySelector("#flame");
+    assert(flameAxis.dataset.sky==="on"&&flameAxis.dataset.seam==="20","gateway outliers did not open a log sky above the 20 ms seam");
+    const skyTicks=flameAxis.dataset.skyTicks.split(" ");
+    assert(skyTicks.includes("100")&&skyTicks.includes("5k")&&!skyTicks.includes("20"),"gateway log sky ticks are not spaced logarithmically up to the 5k top: "+flameAxis.dataset.skyTicks);
     await control({targets:"failure",ping:"delay"});
     document.querySelector('#targets button[data-id="backup"]').click();
     assert(document.querySelector("#title").textContent==="Backup"&&document.querySelector("#flame").dataset.flameRendered==="empty","navigation retained old target evidence while metadata failed");
     await until(()=>document.querySelector("#flame").dataset.flameRendered==="distribution","detail loads independently of failed metadata");
+    assert(flameAxis.dataset.sky==="off"&&flameAxis.dataset.skyTicks==="","backup kept the gateway log sky after a target switch");
     document.querySelector('#targets button[data-id="gateway"]').click();
     await until(()=>document.querySelector("#title").textContent==="Gateway"&&document.querySelector("#flame").dataset.flameRendered==="distribution","gateway detail recovery");
     document.body.dataset.overviewChecks="true";

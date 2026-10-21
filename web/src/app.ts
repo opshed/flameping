@@ -6,17 +6,17 @@ import {RouteHistoryView, type Bounds} from "./route-history";
 import {InterfaceHistoryView} from "./interface-history";
 import {obsessLabel,renderObsessStatus,type ObsessStatus} from "./obsess-status";
 import {OverviewView,detailLink,type MonitorStatus} from "./overview";
+import {flameBwd,flameFwd,flameSplits,formatMs,formatTick,skyLayout,type FlameWindow,type Point,type SkyLayout} from "./flame-scale";
 
 type Target={id:string,name:string,address:string,endpoint?:string,state:string,last_rtt_ms?:number,obsess?:ObsessStatus};
-type Point={time_ms:number,scheduled:number,attempted:number,sent:number,on_time?:number,late:number,unanswered:number,send_errors:number,scheduler_missed:number,rtt_count:number,avg_ms?:number,min_ms?:number,p50_ms?:number,p95_ms?:number,p99_ms?:number,max_ms?:number,distribution_ms?:number[],deadline_miss_pct:number,no_reply_pct:number,partial?:boolean,late_pct?:number,send_error_pct?:number,gap_pct?:number,partial_marker?:number};
 type RangePreset={duration:number,maxPoints:number};
-type FlameState={points:Point[]};
+type FlameState={points:Point[],layout:SkyLayout,window?:FlameWindow};
 const $=(s:string)=>document.querySelector(s) as HTMLElement;
 let target:string|null=null,range="6h",targets:Target[]=[];
 let flame:uPlot|null=null;
 let page:"overview"|"details"="overview",refreshRequest=0;
 let monitorStatus:MonitorStatus|null=null;
-const flameState:FlameState={points:[]};
+const flameState:FlameState={points:[],layout:skyLayout(undefined,0)};
 let viewport:{from:number,to:number}|null=null,seriesRequest=0;
 let routeSelection:Bounds|null=null,interfaceSelection:Bounds|null=null,flameContext:string|null=null;
 const routeView=new RouteHistoryView($("#route-history"),bounds=>drillDown(bounds.from,bounds.to),bounds=>{routeSelection=bounds;flame?.redraw()});
@@ -57,12 +57,17 @@ function flameData(points:Point[]):uPlot.AlignedData {
   return [points.map(point=>point.time_ms/1000),...fields.map(field=>points.map(point=>typeof point[field]==="number"?point[field] as number:null))] as uPlot.AlignedData;
 }
 
-function flameLatencyRange(_u:uPlot,min:number,max:number):uPlot.Range.MinMax {
-  let renderedMax=Number.isFinite(max)?max:0;
-  for(const point of flameState.points)for(const grain of point.distribution_ms??[])if(Number.isFinite(grain)&&grain>renderedMax)renderedMax=grain;
-  if(!Number.isFinite(min)&&renderedMax===0)return[-0.38,1];
-  const upper=Math.max(1,renderedMax*1.08);
-  return[-upper*.38,upper];
+// Without a window (no replies), the axis falls back to the highest grain or auto-ranged contour, as before the sky existed.
+function flameFallbackMax(points:Point[]){let max=0;for(const point of points)for(const value of[...(point.distribution_ms??[]),point.avg_ms,point.p50_ms,point.p95_ms,point.min_ms])if(value!=null&&Number.isFinite(value)&&value>max)max=value;return max}
+// The latency area spans [0,1] latency units and the loss rail keeps [-0.38,0] beneath it, so the scale minimum is bwd(-.38).
+function flameLatencyRange():uPlot.Range.MinMax{const layout=flameState.layout;return[flameBwd(layout,-.38),layout.top]}
+const axisFontFamily='system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
+// Sky ticks need 12 px of clearance from the seam and from each other or their labels collide; when the sky is crowded decades win, then 5s, then 2s.
+const skyTickRank=(value:number)=>[1,5,2].indexOf(Math.round(value/10**Math.floor(Math.log10(value)+1e-9)));
+function flameTicks(u:uPlot){
+  const layout=flameState.layout,splits=flameSplits(layout),kept=[u.valToPos(layout.seam,"y")];
+  const sky=splits.filter(tick=>tick.kind==="sky").sort((a,b)=>skyTickRank(a.value)-skyTickRank(b.value)).filter(tick=>{const y=u.valToPos(tick.value,"y");if(kept.some(other=>Math.abs(other-y)<12))return false;kept.push(y);return true});
+  return[...splits.filter(tick=>tick.kind!=="sky"),...sky.sort((a,b)=>a.value-b.value)];
 }
 
 function flameSmokePlugin(state:FlameState):uPlot.Plugin {
@@ -94,6 +99,19 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
     ctx.fillStyle="rgba(238,73,55,.055)";ctx.fillRect(bbox.left,noReplyTop,bbox.width,laneHeight);
     ctx.strokeStyle="rgba(150,167,176,.24)";ctx.lineWidth=ratio;
     for(const y of[railTop,deadlineTop,noReplyTop,bottom]){ctx.beginPath();ctx.moveTo(bbox.left,y);ctx.lineTo(right,y);ctx.stroke()}
+
+    const layout=state.layout,seamY=u.valToPos(layout.seam,"y",true),noteFont=`${9*ratio}px ui-sans-serif,system-ui,sans-serif`;
+    const dashedRule=(y:number,color:string,dash:number[])=>{ctx.save();ctx.setLineDash(dash.map(part=>part*ratio));ctx.strokeStyle=color;ctx.lineWidth=ratio;ctx.beginPath();ctx.moveTo(bbox.left,y);ctx.lineTo(right,y);ctx.stroke();ctx.restore()};
+    if(layout.sky){
+      ctx.fillStyle="rgba(255,120,40,.035)";ctx.fillRect(bbox.left,bbox.top,bbox.width,seamY-bbox.top);
+      dashedRule(seamY,"rgba(138,160,173,.55)",[4,4]);
+      ctx.font=noteFont;ctx.textAlign="right";ctx.textBaseline="bottom";ctx.fillStyle="#c99a6a";ctx.fillText(`LOG SCALE ABOVE ${formatMs(layout.seam)} ↑`,right-4*ratio,seamY-2*ratio);
+    }
+    const timeout=Math.max(0,...points.map(point=>point.timeout_max_ms??0));
+    if(timeout>0&&timeout<layout.top){
+      const y=u.valToPos(timeout,"y",true);dashedRule(y,"rgba(255,138,106,.55)",[2,4]);
+      ctx.font=noteFont;ctx.textAlign="left";ctx.textBaseline="bottom";ctx.fillStyle="#ff9d7a";ctx.fillText(`DEADLINE ${formatMs(timeout)} · late above`,bbox.left+6*ratio,y-2*ratio);
+    }
 
     ctx.globalCompositeOperation="lighter";
     for(let pointIndex=0;pointIndex<points.length;pointIndex++){
@@ -147,7 +165,19 @@ function flameSmokePlugin(state:FlameState):uPlot.Plugin {
       const width=54*ratio;ctx.fillStyle="rgba(6,11,14,.82)";ctx.fillRect(bbox.left+2*ratio,top+2*ratio,width,laneHeight-4*ratio);ctx.fillStyle=color;ctx.fillText(label,bbox.left+6*ratio,top+laneHeight/2);
     }
     ctx.restore();
+    const skyLabels:string[]=[];
+    if(layout.sky){
+      ctx.save();ctx.strokeStyle="#8aa0ad";ctx.lineWidth=1.2*ratio;ctx.beginPath();
+      for(const[dx,dy]of[[-3,5],[2,1],[-3,-1],[2,-5]])ctx.lineTo(bbox.left+dx*ratio,seamY+dy*ratio);
+      ctx.stroke();
+      // uPlot paints every axis label in one color, so the y axis leaves seam and sky labels blank and they are painted here in warmer ink.
+      ctx.font=`${Math.round(12*ratio)}px ${axisFontFamily}`;ctx.textAlign="right";ctx.textBaseline="middle";
+      const x=Math.round(bbox.left)-Math.round(10*ratio)-Math.round(5*ratio);
+      for(const tick of flameTicks(u)){if(tick.kind==="body")continue;const label=formatTick(tick.value);if(tick.kind==="sky")skyLabels.push(label);ctx.fillStyle=tick.kind==="sky"?"#c99a6a":"#aebfc9";ctx.fillText(label,x,Math.round(u.valToPos(tick.value,"y",true)))}
+      ctx.restore();
+    }
     const host=u.root.parentElement??u.root;
+    host.dataset.sky=layout.sky?"on":"off";host.dataset.seam=String(layout.seam);host.dataset.skyTicks=skyLabels.join(" ");
     host.dataset.flameRendered=points.some(point=>point.distribution_ms?.length)?"distribution":"loss-only";
     host.dataset.lossRail=points.some(point=>point.no_reply_pct>=99.5&&point.rtt_count===0)?"full-no-rtt":"rendered";
     host.dataset.localGaps=points.some(point=>point.send_errors>0||point.scheduler_missed>0)?"rendered":"none";
@@ -166,13 +196,19 @@ function routeSelectionPlugin():uPlot.Plugin{return{hooks:{ready:[alignRoutes],s
   }
 }]}}}
 
-function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:number|undefined,bounds:Bounds,zoom:(from:number,to:number)=>void){
-  flameState.points=points;
+function flameGraph(old:uPlot|null,points:Point[],method:string|undefined,cap:number|undefined,flameWindow:FlameWindow|undefined,bounds:Bounds,zoom:(from:number,to:number)=>void){
+  // The layout must change before setData: the y scale reads it at call time while uPlot re-ranges this reused instance.
+  flameState.points=points;flameState.window=flameWindow;flameState.layout=skyLayout(flameWindow,flameFallbackMax(points));
   const root=$("#flame"),size={width:Math.max(280,root.clientWidth),height:360},data=flameData(points);
   root.dataset.distributionMethod=method??"";root.dataset.distributionCap=cap==null?"":String(cap);root.dataset.maxGrains=String(Math.max(0,...points.map(point=>point.distribution_ms?.length??0)));
-  if(points.length===0){root.dataset.flameRendered="empty";root.dataset.lossRail="empty";root.dataset.localGaps="none"}
+  if(points.length===0){root.dataset.flameRendered="empty";root.dataset.lossRail="empty";root.dataset.localGaps="none";root.dataset.sky="off";root.dataset.seam=String(flameState.layout.seam);root.dataset.skyTicks=""}
   if(old){old.scales.x.range=()=>[bounds.from/1000,bounds.to/1000];old.batch(()=>{if(old.width!==size.width||old.height!==size.height)old.setSize(size);old.setData(data);old.setScale("x",{min:bounds.from/1000,max:bounds.to/1000})});alignRoutes(old);return old}
-  return new uPlot({...size,legend:{show:true},cursor:{drag:{x:true,y:false}},scales:{x:{auto:false,range:()=>[bounds.from/1000,bounds.to/1000]},y:{range:flameLatencyRange},loss:{auto:false,range:()=>[0,100]}},axes:[{stroke:"#82949f",grid:{stroke:"#20313a"}},{scale:"y",stroke:"#82949f",grid:{stroke:"#20313a"},values:(_u,splits)=>splits.map(value=>value<0?"":uPlot.fmtNum(value))}],series:[{},
+  return new uPlot({...size,legend:{show:true},cursor:{drag:{x:true,y:false}},scales:{x:{auto:false,range:()=>[bounds.from/1000,bounds.to/1000]},
+    // AIDEV-NOTE: piecewise body + sky scale (see flame-scale.ts). This uPlot instance is reused across refreshes and target switches, so fwd/bwd/range/splits
+    // read flameState.layout at call time; capturing a layout here would freeze the axis of whichever window happened to create the chart.
+    // The y axis supplies its own splits and an identity filter: uPlot's defaults for distr>=3 assume a pure log axis and would thin the body ticks.
+    y:{distr:100,fwd:v=>flameFwd(flameState.layout,v),bwd:v=>flameBwd(flameState.layout,v),range:flameLatencyRange},loss:{auto:false,range:()=>[0,100]}},
+    axes:[{stroke:"#82949f",grid:{stroke:"#20313a"}},{scale:"y",stroke:"#82949f",font:`12px ${axisFontFamily}`,grid:{stroke:"#20313a",filter:(_u,splits)=>splits.map(value=>flameState.layout.sky&&value===flameState.layout.seam?null:value)},splits:u=>flameTicks(u).map(tick=>tick.value),filter:(_u,splits)=>splits,values:(_u,splits)=>splits.map(value=>flameState.layout.sky&&value>=flameState.layout.seam?null:formatTick(value))}],series:[{},
     {label:"mean RTT",stroke:"#fff0c7",width:2.6,value:msValue},
     {label:"p50",stroke:"#ffd369",width:1,value:msValue},
     {label:"p95",stroke:"#ff9d42",width:1.7,dash:[8,5],value:msValue},
@@ -200,7 +236,7 @@ async function loadSeries(){
   const id=++seriesRequest,selected=target,maxPoints=viewport?900:ranges[range].maxPoints;
   if(changed){
     flameContext=context;
-    flame=flameGraph(flame,[],undefined,undefined,bounds,drillDown);
+    flame=flameGraph(flame,[],undefined,undefined,undefined,bounds,drillDown);
     $("#stats").innerHTML=stat("Latest mean","—")+stat("Deadline miss","—")+stat("No reply","—")+stat("Packets sent","—");
     $("#flame-status").hidden=false;$("#flame-status").textContent="Loading latency observations…";
   }
@@ -210,7 +246,7 @@ async function loadSeries(){
     if(id!==seriesRequest||selected!==target)return;
     const p:Point[]=s.points??[];
     p.forEach(x=>{x.rtt_count??=0;x.late_pct=x.sent?100*x.late/x.sent:0;x.send_error_pct=x.attempted?100*x.send_errors/x.attempted:0;x.gap_pct=x.scheduled?100*x.scheduler_missed/x.scheduled:0;x.partial_marker=x.partial?1:undefined});
-    flame=flameGraph(flame,p,s.distribution_method,s.distribution_cap,bounds,drillDown);
+    flame=flameGraph(flame,p,s.distribution_method,s.distribution_cap,s.window,bounds,drillDown);
     const last=p.at(-1)||{} as Point,sent=p.reduce((a,x)=>a+x.sent,0),miss=p.reduce((a,x)=>a+x.late+x.unanswered,0),no=p.reduce((a,x)=>a+x.unanswered,0);
     $("#stats").innerHTML=stat("Latest mean",last.avg_ms==null?"—":last.avg_ms.toFixed(2)+" ms")+stat("Deadline miss",sent?(100*miss/sent).toFixed(2)+"%":"—")+stat("No reply",sent?(100*no/sent).toFixed(2)+"%":"—")+stat("Packets sent",sent.toLocaleString());
     $("#flame-status").hidden=true;
